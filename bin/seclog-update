@@ -4,9 +4,19 @@
 
 set -euo pipefail
 
+DEFAULT_REPO_DIR="$HOME/Projects/seclog-linux"
 REPO_DIR="${SECLOG_REPO_DIR:-$HOME/Projects/seclog-linux}"
 SERVICE="seclog-linux-fail-monitor.service"
 CONFIG="${SSH_NOTIFY_CONFIG:-$HOME/.config/seclog-linux/config}"
+ALLOW_CUSTOM_REPO_DIR="${ALLOW_CUSTOM_REPO_DIR:-0}"
+VERIFY_UPDATE_SIGNATURES="${VERIFY_UPDATE_SIGNATURES:-0}"
+EXPECTED_UPDATE_ORIGIN="${EXPECTED_UPDATE_ORIGIN:-https://github.com/arn-c0de/seclog-linux.git}"
+EXPECTED_UPDATE_ORIGIN_ALT="${EXPECTED_UPDATE_ORIGIN_ALT:-git@github.com:arn-c0de/seclog-linux.git}"
+
+if [ -f "$CONFIG" ]; then
+    # shellcheck disable=SC1090
+    . "$CONFIG"
+fi
 
 if [ ! -d "$REPO_DIR/.git" ]; then
     echo "No git checkout found at: $REPO_DIR" >&2
@@ -14,18 +24,43 @@ if [ ! -d "$REPO_DIR/.git" ]; then
     exit 1
 fi
 
-cd "$REPO_DIR"
+REPO_REAL="$(cd -- "$REPO_DIR" && pwd -P)"
+DEFAULT_REPO_REAL="$DEFAULT_REPO_DIR"
+[ -d "$DEFAULT_REPO_DIR" ] && DEFAULT_REPO_REAL="$(cd -- "$DEFAULT_REPO_DIR" && pwd -P)"
+
+if [ "${SECLOG_REPO_DIR+x}" = "x" ] && [ "$REPO_REAL" != "$DEFAULT_REPO_REAL" ] && [ "$ALLOW_CUSTOM_REPO_DIR" != "1" ]; then
+    echo "Refusing custom SECLOG_REPO_DIR without ALLOW_CUSTOM_REPO_DIR=1" >&2
+    echo "Expected: $DEFAULT_REPO_REAL" >&2
+    echo "Got:      $REPO_REAL" >&2
+    exit 1
+fi
+
+cd -- "$REPO_REAL"
+
+ORIGIN_URL="$(git remote get-url origin)"
+if [ "$ORIGIN_URL" != "$EXPECTED_UPDATE_ORIGIN" ] && [ "$ORIGIN_URL" != "$EXPECTED_UPDATE_ORIGIN_ALT" ]; then
+    echo "Refusing update from unexpected origin remote." >&2
+    echo "Expected: $EXPECTED_UPDATE_ORIGIN or $EXPECTED_UPDATE_ORIGIN_ALT" >&2
+    echo "Got:      $ORIGIN_URL" >&2
+    exit 1
+fi
 
 BRANCH="$(git branch --show-current)"
 if [ -z "$BRANCH" ]; then
-    echo "No current branch checked out in $REPO_DIR" >&2
+    echo "No current branch checked out in $REPO_REAL" >&2
+    exit 1
+fi
+
+INSTALL_SCRIPT="$REPO_REAL/install.sh"
+if [ ! -f "$INSTALL_SCRIPT" ]; then
+    echo "Installer not found at: $INSTALL_SCRIPT" >&2
     exit 1
 fi
 
 echo "== seclog-update =="
-echo "Repo:    $REPO_DIR"
+echo "Repo:    $REPO_REAL"
 echo "Branch:  $BRANCH"
-echo "Remote:  $(git remote get-url origin)"
+echo "Remote:  $ORIGIN_URL"
 
 git fetch origin --prune
 
@@ -37,6 +72,12 @@ REMOTE_SHORT="$(git rev-parse --short "$REMOTE_COMMIT")"
 
 echo "Current: $LOCAL_SHORT"
 echo "Target:  $REMOTE_SHORT"
+
+if [ "$VERIFY_UPDATE_SIGNATURES" = "1" ]; then
+    echo "Verify:  commit signature required"
+    git verify-commit "$REMOTE_COMMIT" >/dev/null
+    echo "Verify:  signature ok"
+fi
 
 if [ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]; then
     echo "Update:  available"
@@ -56,15 +97,10 @@ else
     exit 0
 fi
 
-/bin/bash ./install.sh
+/bin/bash "$INSTALL_SCRIPT"
 
 systemctl --user daemon-reload
 systemctl --user restart "$SERVICE"
-
-if [ -f "$CONFIG" ]; then
-    # shellcheck disable=SC1090
-    . "$CONFIG"
-fi
 
 UPDATE_HOST="$(hostname)"
 UPDATE_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"

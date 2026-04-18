@@ -106,6 +106,9 @@ Proceed with update? [y/N]
   re-running the installer.
 - After a successful update, `seclog-update` sends a push with host, source IP,
   branch, old commit, new commit and timestamp.
+- By default, `seclog-update` only allows the expected repo checkout at
+  `~/Projects/seclog-linux` and only if `origin` matches the official repo
+  remote. You must opt in explicitly to use a custom checkout path.
 
 To just restart the daemon after config changes:
 
@@ -235,6 +238,16 @@ LOGIN_JOURNAL_TIMEOUT=2
 
 # Push payload detail level: full or minimal
 PUSH_METADATA_LEVEL="full"
+
+# Allow seclog-update to use a custom SECLOG_REPO_DIR
+ALLOW_CUSTOM_REPO_DIR=0
+
+# Expected origin remotes for seclog-update
+EXPECTED_UPDATE_ORIGIN="https://github.com/arn-c0de/seclog-linux.git"
+EXPECTED_UPDATE_ORIGIN_ALT="git@github.com:arn-c0de/seclog-linux.git"
+
+# Require signed commits for seclog-update
+VERIFY_UPDATE_SIGNATURES=0
 ```
 
 What the settings do:
@@ -245,6 +258,9 @@ What the settings do:
 - `FAIL_RATELIMIT_WINDOW`: Prevents push spam during brute-force attempts.
 - `LOGIN_JOURNAL_TIMEOUT`: Caps how long interactive login waits on `journalctl` before continuing.
 - `PUSH_METADATA_LEVEL`: Set to `minimal` to omit UID, groups, reverse-DNS host, TTY and SSH key fingerprint from login pushes.
+- `ALLOW_CUSTOM_REPO_DIR`: Keeps `seclog-update` pinned to `~/Projects/seclog-linux` unless you explicitly allow another checkout path.
+- `EXPECTED_UPDATE_ORIGIN` / `EXPECTED_UPDATE_ORIGIN_ALT`: `seclog-update` aborts if `origin` does not match one of these remotes.
+- `VERIFY_UPDATE_SIGNATURES`: When set to `1`, `seclog-update` requires `git verify-commit` to succeed for the target commit before applying it.
 
 `PUSH_METADATA_LEVEL` changes the login push payload like this:
 
@@ -265,6 +281,14 @@ failed-login alert format or the update notification sent by `seclog-update`.
 - previous commit
 - new commit
 - timestamp
+
+Security behavior of `seclog-update`:
+
+- It changes into the repository using `cd --` and resolves the canonical path first.
+- It runs the installer via the absolute path inside the checked-out repository.
+- It refuses updates from unexpected `origin` remotes.
+- It refuses a custom `SECLOG_REPO_DIR` unless `ALLOW_CUSTOM_REPO_DIR=1` is set.
+- It can optionally enforce signed commits with `VERIFY_UPDATE_SIGNATURES=1`.
 
 ## Typical workflow
 
@@ -369,6 +393,7 @@ The project separates interactive login handling from background monitoring:
 - `bin/ssh-failed-monitor.sh`: Watches the journal continuously and pushes failed-login events.
 - `bin/seclog`: Prints the security summary without sending a push.
 - `bin/seclog-update`: Updates a git checkout on its current branch, asks for confirmation when needed, re-runs `install.sh`, then sends an ntfy update push with host/IP and commit change.
+  It also validates the repo path and expected `origin`, and can optionally verify commit signatures.
 - `bin/seclog-restart`: Reloads and restarts the failed-login monitor user service after config or unit changes.
 - `systemd/seclog-linux-fail-monitor.service`: Keeps the failed-login monitor alive as a user service.
 

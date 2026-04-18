@@ -26,3 +26,16 @@ LOGIN_JOURNAL_TIMEOUT=2
 #   full    = include UID, groups, client reverse-DNS, SSH key fingerprint, TTY
 #   minimal = omit extra identity/system metadata and keep only essential context
 PUSH_METADATA_LEVEL="full"
+
+# Allow seclog-update to use a custom SECLOG_REPO_DIR. Default is off, so
+# updates only run from $HOME/Projects/seclog-linux unless you opt in.
+ALLOW_CUSTOM_REPO_DIR=0
+
+# Expected git remote(s) for seclog-update. Updates abort if origin does not
+# match one of these values.
+EXPECTED_UPDATE_ORIGIN="https://github.com/arn-c0de/seclog-linux.git"
+EXPECTED_UPDATE_ORIGIN_ALT="git@github.com:arn-c0de/seclog-linux.git"
+
+# Require `git verify-commit` to succeed for the target commit before applying
+# an update. Enable this only after you have configured trusted signing keys.
+VERIFY_UPDATE_SIGNATURES=0
