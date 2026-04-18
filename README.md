@@ -286,6 +286,20 @@ failed-login alert format or the update notification sent by `seclog-update`.
 - commit text / subject line
 - timestamp
 
+Example update push:
+
+```text
+seclog updated on raspberrypi: Show commit text in seclog-update output
+
+Host:    raspberrypi
+IP:      192.168.178.244
+Branch:  1.0.1
+From:    5b05d66
+To:      78a6287
+Commit:  Show commit text in seclog-update output
+Time:    2026-04-18 21:12:00 CEST
+```
+
 Security behavior of `seclog-update`:
 
 - It changes into the repository using `cd --` and resolves the canonical path first.
