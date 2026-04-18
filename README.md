@@ -246,6 +246,26 @@ What the settings do:
 - `LOGIN_JOURNAL_TIMEOUT`: Caps how long interactive login waits on `journalctl` before continuing.
 - `PUSH_METADATA_LEVEL`: Set to `minimal` to omit UID, groups, reverse-DNS host, TTY and SSH key fingerprint from login pushes.
 
+`PUSH_METADATA_LEVEL` changes the login push payload like this:
+
+- `full`: includes username, UID, sudo hint, client IP/port, reverse-DNS host,
+  auth method, key type, SSH key fingerprint, TTY, groups, active session
+  summary, failed-attempt summary and timestamp.
+- `minimal`: keeps only username, sudo hint, client IP/port, auth method,
+  active session summary, failed-attempt summary and timestamp.
+
+This setting affects the **interactive SSH login push**. It does not change the
+failed-login alert format or the update notification sent by `seclog-update`.
+
+`seclog-update` sends a separate management push after a real update with:
+
+- hostname of the machine that ran the update
+- detected local source IP of that machine
+- branch name
+- previous commit
+- new commit
+- timestamp
+
 ## Typical workflow
 
 1. Install the project with `./install.sh`.
