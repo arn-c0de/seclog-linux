@@ -31,9 +31,24 @@ git fetch origin --prune
 LOCAL_COMMIT="$(git rev-parse HEAD)"
 REMOTE_REF="origin/$BRANCH"
 REMOTE_COMMIT="$(git rev-parse "$REMOTE_REF")"
+LOCAL_SHORT="$(git rev-parse --short "$LOCAL_COMMIT")"
+REMOTE_SHORT="$(git rev-parse --short "$REMOTE_COMMIT")"
+
+echo "Current: $LOCAL_SHORT"
+echo "Target:  $REMOTE_SHORT"
 
 if [ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]; then
-    echo "Update:  $(git rev-parse --short "$LOCAL_COMMIT") -> $(git rev-parse --short "$REMOTE_COMMIT")"
+    echo "Update:  available"
+    printf "Proceed with update? [y/N] "
+    read -r confirm
+    case "$confirm" in
+        y|Y) ;;
+        *)
+            echo "Aborted."
+            exit 0
+            ;;
+    esac
+    echo "Updating: $LOCAL_SHORT -> $REMOTE_SHORT"
     git pull --ff-only origin "$BRANCH"
 else
     echo "Update:  already up to date"
