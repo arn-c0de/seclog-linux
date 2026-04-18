@@ -75,7 +75,8 @@ available after `./install.sh`:
 
 - `seclog-update`: fetches the newest commit for the **currently checked-out branch**,
   shows your current and target commit, asks for confirmation only when an
-  update is available, then runs the update and re-runs `install.sh`.
+  update is available, then runs the update, re-runs `install.sh` and sends a
+  push notification about the applied update.
 - `seclog-restart`: reloads user systemd units and restarts the failed-login
   monitor service.
 
@@ -103,6 +104,8 @@ Proceed with update? [y/N]
 - Any other key or an empty input aborts the update.
 - If `Current` and `Target` are identical, `seclog-update` exits without
   re-running the installer.
+- After a successful update, `seclog-update` sends a push with host, source IP,
+  branch, old commit, new commit and timestamp.
 
 To just restart the daemon after config changes:
 
@@ -201,8 +204,8 @@ If your checkout lives at `~/Projects/seclog-linux`, `seclog-update` works witho
 setting `SECLOG_REPO_DIR`.
 
 `seclog-update` always works on the currently checked-out branch. It asks for
-confirmation before applying a real update and exits immediately if the checkout
-is already current.
+confirmation before applying a real update, exits immediately if the checkout
+is already current, and sends an ntfy push after a successful update.
 
 ## Configuration
 
@@ -345,7 +348,7 @@ The project separates interactive login handling from background monitoring:
 - `bin/ssh-login-notify.sh`: Runs from `.bashrc` on interactive SSH logins.
 - `bin/ssh-failed-monitor.sh`: Watches the journal continuously and pushes failed-login events.
 - `bin/seclog`: Prints the security summary without sending a push.
-- `bin/seclog-update`: Updates a git checkout on its current branch, asks for confirmation when needed, then re-runs `install.sh`.
+- `bin/seclog-update`: Updates a git checkout on its current branch, asks for confirmation when needed, re-runs `install.sh`, then sends an ntfy update push with host/IP and commit change.
 - `bin/seclog-restart`: Reloads and restarts the failed-login monitor user service after config or unit changes.
 - `systemd/seclog-linux-fail-monitor.service`: Keeps the failed-login monitor alive as a user service.
 

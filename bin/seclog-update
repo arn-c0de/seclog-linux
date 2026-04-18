@@ -6,6 +6,7 @@ set -euo pipefail
 
 REPO_DIR="${SECLOG_REPO_DIR:-$HOME/Projects/seclog-linux}"
 SERVICE="seclog-linux-fail-monitor.service"
+CONFIG="${SSH_NOTIFY_CONFIG:-$HOME/.config/seclog-linux/config}"
 
 if [ ! -d "$REPO_DIR/.git" ]; then
     echo "No git checkout found at: $REPO_DIR" >&2
@@ -59,6 +60,35 @@ fi
 
 systemctl --user daemon-reload
 systemctl --user restart "$SERVICE"
+
+if [ -f "$CONFIG" ]; then
+    # shellcheck disable=SC1090
+    . "$CONFIG"
+fi
+
+UPDATE_HOST="$(hostname)"
+UPDATE_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+[ -z "$UPDATE_IP" ] && UPDATE_IP="$(ip route get 1 2>/dev/null | awk '/src/ {for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}')"
+[ -z "$UPDATE_IP" ] && UPDATE_IP="unknown"
+UPDATE_TIME="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+
+if [ -n "${NTFY_URL:-}" ]; then
+    BODY=$(printf 'Host:    %s\nIP:      %s\nBranch:  %s\nFrom:    %s\nTo:      %s\nTime:    %s' \
+        "$UPDATE_HOST" \
+        "$UPDATE_IP" \
+        "$BRANCH" \
+        "$LOCAL_SHORT" \
+        "$(git rev-parse --short HEAD)" \
+        "$UPDATE_TIME")
+
+    curl -fsS -m 3 \
+        -H "Title: seclog updated on $UPDATE_HOST" \
+        -H "Tags: arrows_counterclockwise,white_check_mark" \
+        -H "Priority: default" \
+        ${NTFY_TOKEN:+-H "Authorization: Bearer $NTFY_TOKEN"} \
+        -d "$BODY" \
+        "$NTFY_URL" >/dev/null 2>&1 || true
+fi
 
 echo "Service: $(systemctl --user is-active "$SERVICE")"
 echo "Commit:  $(git rev-parse --short HEAD)"
