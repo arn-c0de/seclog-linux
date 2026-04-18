@@ -69,9 +69,12 @@ REMOTE_REF="origin/$BRANCH"
 REMOTE_COMMIT="$(git rev-parse "$REMOTE_REF")"
 LOCAL_SHORT="$(git rev-parse --short "$LOCAL_COMMIT")"
 REMOTE_SHORT="$(git rev-parse --short "$REMOTE_COMMIT")"
+LOCAL_SUBJECT="$(git log -1 --pretty=%s "$LOCAL_COMMIT")"
+REMOTE_SUBJECT="$(git log -1 --pretty=%s "$REMOTE_COMMIT")"
 
 echo "Current: $LOCAL_SHORT"
 echo "Target:  $REMOTE_SHORT"
+echo "Message: $REMOTE_SUBJECT"
 
 if [ "$VERIFY_UPDATE_SIGNATURES" = "1" ]; then
     echo "Verify:  commit signature required"
@@ -100,6 +103,7 @@ if [ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]; then
     git pull --ff-only origin "$BRANCH"
 else
     echo "Update:  already up to date"
+    echo "Commit:  $LOCAL_SHORT ($LOCAL_SUBJECT)"
     exit 0
 fi
 
@@ -113,18 +117,20 @@ UPDATE_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 [ -z "$UPDATE_IP" ] && UPDATE_IP="$(ip route get 1 2>/dev/null | awk '/src/ {for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}')"
 [ -z "$UPDATE_IP" ] && UPDATE_IP="unknown"
 UPDATE_TIME="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+UPDATE_COMMIT_TEXT="$(git log -1 --pretty=%s HEAD)"
 
 if [ -n "${NTFY_URL:-}" ]; then
-    BODY=$(printf 'Host:    %s\nIP:      %s\nBranch:  %s\nFrom:    %s\nTo:      %s\nTime:    %s' \
+    BODY=$(printf 'Host:    %s\nIP:      %s\nBranch:  %s\nFrom:    %s\nTo:      %s\nCommit:  %s\nTime:    %s' \
         "$UPDATE_HOST" \
         "$UPDATE_IP" \
         "$BRANCH" \
         "$LOCAL_SHORT" \
         "$(git rev-parse --short HEAD)" \
+        "$UPDATE_COMMIT_TEXT" \
         "$UPDATE_TIME")
 
     curl -fsS -m 3 \
-        -H "Title: seclog updated on $UPDATE_HOST" \
+        -H "Title: seclog updated on $UPDATE_HOST: $UPDATE_COMMIT_TEXT" \
         -H "Tags: arrows_counterclockwise,white_check_mark" \
         -H "Priority: default" \
         ${NTFY_TOKEN:+-H "Authorization: Bearer $NTFY_TOKEN"} \
@@ -133,4 +139,4 @@ if [ -n "${NTFY_URL:-}" ]; then
 fi
 
 echo "Service: $(systemctl --user is-active "$SERVICE")"
-echo "Commit:  $(git rev-parse --short HEAD)"
+echo "Commit:  $(git rev-parse --short HEAD) ($UPDATE_COMMIT_TEXT)"

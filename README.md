@@ -96,6 +96,7 @@ Branch:  1.0.1
 Remote:  https://github.com/arn-c0de/seclog-linux.git
 Current: abc1234
 Target:  def5678
+Message: Harden seclog-update trust boundaries
 Update:  available
 Proceed with update? [y/N]
 ```
@@ -105,7 +106,9 @@ Proceed with update? [y/N]
 - If `Current` and `Target` are identical, `seclog-update` exits without
   re-running the installer.
 - After a successful update, `seclog-update` sends a push with host, source IP,
-  branch, old commit, new commit and timestamp.
+  branch, old commit, new commit, commit text and timestamp.
+- The terminal output also shows the target commit text, and on an already
+  current checkout it prints the current commit hash together with its subject.
 - By default, `seclog-update` only allows the expected repo checkout at
   `~/Projects/seclog-linux` and only if `origin` matches the official repo
   remote. You must opt in explicitly to use a custom checkout path.
@@ -280,6 +283,7 @@ failed-login alert format or the update notification sent by `seclog-update`.
 - branch name
 - previous commit
 - new commit
+- commit text / subject line
 - timestamp
 
 Security behavior of `seclog-update`:
@@ -405,7 +409,7 @@ The project separates interactive login handling from background monitoring:
 - `bin/ssh-login-notify.sh`: Runs from `.bashrc` on interactive SSH logins.
 - `bin/ssh-failed-monitor.sh`: Watches the journal continuously and pushes failed-login events.
 - `bin/seclog`: Prints the security summary without sending a push.
-- `bin/seclog-update`: Updates a git checkout on its current branch, asks for confirmation when needed, re-runs `install.sh`, then sends an ntfy update push with host/IP and commit change.
+- `bin/seclog-update`: Updates a git checkout on its current branch, asks for confirmation when needed, re-runs `install.sh`, then sends an ntfy update push with host/IP, commit change and commit text.
   It also validates the repo path and expected `origin`, and can optionally verify commit signatures.
 - `bin/seclog-restart`: Reloads and restarts the failed-login monitor user service after config or unit changes.
 - `systemd/seclog-linux-fail-monitor.service`: Keeps the failed-login monitor alive as a user service.
