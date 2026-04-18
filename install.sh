@@ -5,6 +5,7 @@
 #   ~/.local/bin/ssh-login-notify.sh   (sourced from .bashrc on SSH login)
 #   ~/.local/bin/ssh-failed-monitor.sh (systemd user service)
 #   ~/.local/bin/seclog                (interactive CLI)
+#   ~/.local/bin/seclog-update         (git update helper)
 #   ~/.config/seclog-linux/config    (your NTFY_URL + token)
 #   ~/.config/systemd/user/seclog-linux-fail-monitor.service
 #
@@ -24,6 +25,7 @@ mkdir -p "$BIN" "$CFG_DIR" "$SYSD_DIR" "$HOME/.cache/ssh-fail"
 install -m 0755 "$SRC/bin/ssh-login-notify.sh"    "$BIN/ssh-login-notify.sh"
 install -m 0755 "$SRC/bin/ssh-failed-monitor.sh"  "$BIN/ssh-failed-monitor.sh"
 install -m 0755 "$SRC/bin/seclog"                 "$BIN/seclog"
+install -m 0755 "$SRC/bin/seclog-update"          "$BIN/seclog-update"
 echo "✓ scripts installed to $BIN"
 
 # Config: copy example if user has no config yet
@@ -79,10 +81,13 @@ cat << EOF
 1. Edit your config:  $CFG_DIR/config
    Set NTFY_URL and (optionally) NTFY_TOKEN.
 
-2. For persistent fail-monitor (survives logout), run ONCE as root:
+2. Update later from a git checkout with:
+     SECLOG_REPO_DIR="$SRC" seclog-update
+
+3. For persistent fail-monitor (survives logout), run ONCE as root:
      sudo loginctl enable-linger \$USER
 
-3. Test with:  seclog
+4. Test with:  seclog
    Re-login via SSH to see the banner + receive a push.
 
 EOF

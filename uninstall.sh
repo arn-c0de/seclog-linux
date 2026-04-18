@@ -11,7 +11,7 @@ systemctl --user disable --now seclog-linux-fail-monitor.service >/dev/null 2>&1
 rm -f "$SYSD_DIR/seclog-linux-fail-monitor.service"
 systemctl --user daemon-reload >/dev/null 2>&1 || true
 
-rm -f "$BIN/ssh-login-notify.sh" "$BIN/ssh-failed-monitor.sh" "$BIN/seclog"
+rm -f "$BIN/ssh-login-notify.sh" "$BIN/ssh-failed-monitor.sh" "$BIN/seclog" "$BIN/seclog-update"
 
 # Remove .bashrc hook
 if grep -q "seclog-linux:" "$HOME/.bashrc" 2>/dev/null; then

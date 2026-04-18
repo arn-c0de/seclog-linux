@@ -1,0 +1,48 @@
+#!/bin/bash
+# Update an installed seclog-linux checkout to the newest commit on its current
+# branch, then re-run the installer so deployed scripts stay in sync.
+
+set -euo pipefail
+
+REPO_DIR="${SECLOG_REPO_DIR:-$HOME/Projects/seclog-linux}"
+SERVICE="seclog-linux-fail-monitor.service"
+
+if [ ! -d "$REPO_DIR/.git" ]; then
+    echo "No git checkout found at: $REPO_DIR" >&2
+    echo "Set SECLOG_REPO_DIR to your seclog-linux checkout and retry." >&2
+    exit 1
+fi
+
+cd "$REPO_DIR"
+
+BRANCH="$(git branch --show-current)"
+if [ -z "$BRANCH" ]; then
+    echo "No current branch checked out in $REPO_DIR" >&2
+    exit 1
+fi
+
+echo "== seclog-update =="
+echo "Repo:    $REPO_DIR"
+echo "Branch:  $BRANCH"
+echo "Remote:  $(git remote get-url origin)"
+
+git fetch origin --prune
+
+LOCAL_COMMIT="$(git rev-parse HEAD)"
+REMOTE_REF="origin/$BRANCH"
+REMOTE_COMMIT="$(git rev-parse "$REMOTE_REF")"
+
+if [ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]; then
+    echo "Update:  $(git rev-parse --short "$LOCAL_COMMIT") -> $(git rev-parse --short "$REMOTE_COMMIT")"
+    git pull --ff-only origin "$BRANCH"
+else
+    echo "Update:  already up to date"
+fi
+
+./install.sh
+
+systemctl --user daemon-reload
+systemctl --user restart "$SERVICE"
+
+echo "Service: $(systemctl --user is-active "$SERVICE")"
+echo "Commit:  $(git rev-parse --short HEAD)"

@@ -63,6 +63,7 @@ source-IP per 5 minutes so a brute-force flood won't spam your phone).
 | `bin/ssh-login-notify.sh` | Sourced from `.bashrc` on SSH login. Prints the banner and sends the login push. |
 | `bin/ssh-failed-monitor.sh` | Long-running daemon. Tails `journalctl` for failed SSH events and pushes them. |
 | `bin/seclog` | CLI command — prints the same banner on demand, without sending a push. |
+| `bin/seclog-update` | Pulls the newest commit for your checked-out branch and re-runs the installer. |
 | `systemd/seclog-linux-fail-monitor.service` | User-level systemd unit that supervises the daemon. |
 | `ntfy/server.yml.example` | Recommended hardened config for self-hosted ntfy. |
 
@@ -146,6 +147,15 @@ NTFY_TOKEN=""  # only if your ntfy needs auth
 ```
 
 Re-login via SSH — you should see the banner and get a push.
+
+If you installed from a git checkout and want to update later:
+
+```bash
+SECLOG_REPO_DIR="$PWD" seclog-update
+```
+
+If your checkout lives at `~/Projects/seclog-linux`, `seclog-update` works without
+setting `SECLOG_REPO_DIR`.
 
 ## Configuration
 
@@ -270,6 +280,7 @@ The project separates interactive login handling from background monitoring:
 - `bin/ssh-login-notify.sh`: Runs from `.bashrc` on interactive SSH logins.
 - `bin/ssh-failed-monitor.sh`: Watches the journal continuously and pushes failed-login events.
 - `bin/seclog`: Prints the security summary without sending a push.
+- `bin/seclog-update`: Updates a git checkout on its current branch and re-runs `install.sh`.
 - `systemd/seclog-linux-fail-monitor.service`: Keeps the failed-login monitor alive as a user service.
 
 This means:
