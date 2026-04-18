@@ -1,0 +1,15 @@
+# ntfy self-hosted config (example) — mount into container at /etc/ntfy/server.yml
+# Docs: https://docs.ntfy.sh/config/
+
+base-url: http://YOUR_NTFY_HOST:2586
+listen-http: ":80"
+
+cache-file: /var/cache/ntfy/cache.db
+auth-file: /var/cache/ntfy/user.db
+auth-default-access: deny-all
+behind-proxy: false
+
+# Home-server friendly rate-limits — raise if many clients
+visitor-request-limit-burst: 1000
+visitor-request-limit-replenish: 1s
+visitor-message-daily-limit: 100000

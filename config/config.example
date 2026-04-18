@@ -1,0 +1,19 @@
+# Config for seclog-linux
+# Copy this to $HOME/.config/seclog-linux/config and edit.
+
+# Full ntfy topic URL (server + topic). Can be http or https, public or self-hosted.
+# Examples:
+#   https://ntfy.sh/your-unique-topic
+#   http://192.168.1.10:2586/ssh-login
+NTFY_URL="http://YOUR_NTFY_HOST:2586/YOUR_TOPIC"
+
+# Ntfy auth token (optional). Required if your ntfy instance uses auth.
+# Leave empty for anonymous/public topics.
+NTFY_TOKEN=""
+
+# How far back to look for failed attempts in the login banner
+FAIL_LOOKBACK="24 hours ago"
+
+# Rate-limit window for failed-login pushes, in seconds (default 300 = 5 min).
+# During brute-force, at most one push per source-IP per window.
+FAIL_RATELIMIT_WINDOW=300

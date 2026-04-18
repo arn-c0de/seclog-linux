@@ -1,0 +1,23 @@
+# Local secrets & state — never commit
+config/config
+*.credentials
+*.secret
+*.env
+/.ntfy/
+.codex
+
+# Editor & OS junk
+*.swp
+*.swo
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# Backups
+*.bak
+*.bak.*
+
+# Build artifacts (none today, but future-proof)
+/dist/
+/build/

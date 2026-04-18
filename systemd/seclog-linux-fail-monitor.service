@@ -1,0 +1,23 @@
+[Unit]
+Description=seclog-linux failed-login monitor (pushes to ntfy)
+After=network-online.target systemd-journald.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+ExecStart=/bin/bash %h/.local/bin/ssh-failed-monitor.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.cache/ssh-fail %h/.config/seclog-linux
+
+[Install]
+WantedBy=default.target
