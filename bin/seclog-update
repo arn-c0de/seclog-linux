@@ -52,6 +52,7 @@ if [ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]; then
     git pull --ff-only origin "$BRANCH"
 else
     echo "Update:  already up to date"
+    exit 0
 fi
 
 ./install.sh
