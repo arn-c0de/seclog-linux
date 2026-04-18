@@ -315,6 +315,9 @@ To use signed-update verification in practice:
 3. Set `VERIFY_UPDATE_SIGNATURES=1` in `~/.config/seclog-linux/config`.
 4. Run `seclog-update`. It will abort unless `git verify-commit` succeeds for the target commit.
 
+For the full trust model, threat boundaries and limits of this mechanism, see
+[SECURITY.md](SECURITY.md).
+
 For SSH signing, an `allowed_signers` line looks like this:
 
 ```text
