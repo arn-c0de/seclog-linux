@@ -290,6 +290,19 @@ Security behavior of `seclog-update`:
 - It refuses a custom `SECLOG_REPO_DIR` unless `ALLOW_CUSTOM_REPO_DIR=1` is set.
 - It can optionally enforce signed commits with `VERIFY_UPDATE_SIGNATURES=1`.
 
+To use signed-update verification in practice:
+
+1. Configure your local repo to sign commits with a trusted key.
+2. Put the matching public key into an `allowed_signers` file on the target host.
+3. Set `VERIFY_UPDATE_SIGNATURES=1` in `~/.config/seclog-linux/config`.
+4. Run `seclog-update`. It will abort unless `git verify-commit` succeeds for the target commit.
+
+For SSH signing, an `allowed_signers` line looks like this:
+
+```text
+arn-c0de@protonmail.com ssh-ed25519 AAAA...
+```
+
 ## Typical workflow
 
 1. Install the project with `./install.sh`.
