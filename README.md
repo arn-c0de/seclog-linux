@@ -97,6 +97,9 @@ Remote:  https://github.com/arn-c0de/seclog-linux.git
 Current: abc1234
 Target:  def5678
 Message: Harden seclog-update trust boundaries
+Verify:  commit signature required
+VERIFIED: yes
+Signer:   arn-c0de@protonmail.com with ED25519 key SHA256:CTFPPmCdjzltcUEfz5uJvfLrKuj6vJzveU/kfk6Gvlo
 Update:  available
 Proceed with update? [y/N]
 ```
@@ -109,6 +112,8 @@ Proceed with update? [y/N]
   branch, old commit, new commit, commit text and timestamp.
 - The terminal output also shows the target commit text, and on an already
   current checkout it prints the current commit hash together with its subject.
+- If signature verification is enabled, the terminal output also shows an
+  explicit `VERIFIED: yes` line and the signer identity for the target commit.
 - By default, `seclog-update` only allows the expected repo checkout at
   `~/Projects/seclog-linux` and only if `origin` matches the official repo
   remote. You must opt in explicitly to use a custom checkout path.
