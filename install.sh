@@ -68,6 +68,13 @@ case ":$PATH:" in
        echo "    export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
 esac
 
+if [ "$(id -u)" -ne 0 ] && ! id -nG 2>/dev/null | grep -qw systemd-journal; then
+    echo "⚠ $USER is not in group systemd-journal — SSH log reads may fail on this distro"
+    echo "    If login history or failed-login monitoring stay empty, run once:"
+    echo "    sudo usermod -aG systemd-journal \$USER"
+    echo "    Then log out and back in."
+fi
+
 # Enable & start the failed-monitor service
 systemctl --user daemon-reload
 systemctl --user enable --now seclog-linux-fail-monitor.service >/dev/null 2>&1 || true

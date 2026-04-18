@@ -11,6 +11,10 @@ STATE_DIR="${STATE_DIR:-$HOME/.cache/ssh-fail}"
 WINDOW="${FAIL_RATELIMIT_WINDOW:-300}"
 mkdir -p "$STATE_DIR"
 
+if [ "$(id -u)" -ne 0 ] && ! id -nG 2>/dev/null | grep -qw systemd-journal; then
+    echo "seclog-linux: user may not be able to read SSH journal entries; add $USER to systemd-journal and re-login" >&2
+fi
+
 journalctl -f -n 0 --no-pager _COMM=sshd-session _COMM=sshd 2>/dev/null | \
 while IFS= read -r line; do
     case "$line" in

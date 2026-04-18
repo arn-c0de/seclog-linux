@@ -226,6 +226,12 @@ FAIL_LOOKBACK="24 hours ago"
 
 # Failed-login push rate-limit per source IP in seconds
 FAIL_RATELIMIT_WINDOW=300
+
+# Max seconds to spend reading journal data during interactive SSH login
+LOGIN_JOURNAL_TIMEOUT=2
+
+# Push payload detail level: full or minimal
+PUSH_METADATA_LEVEL="full"
 ```
 
 What the settings do:
@@ -234,6 +240,8 @@ What the settings do:
 - `NTFY_TOKEN`: Optional token for authenticated ntfy servers.
 - `FAIL_LOOKBACK`: Human-readable window shown in the banner, for example `1 hour ago` or `7 days ago`.
 - `FAIL_RATELIMIT_WINDOW`: Prevents push spam during brute-force attempts.
+- `LOGIN_JOURNAL_TIMEOUT`: Caps how long interactive login waits on `journalctl` before continuing.
+- `PUSH_METADATA_LEVEL`: Set to `minimal` to omit UID, groups, reverse-DNS host, TTY and SSH key fingerprint from login pushes.
 
 ## Typical workflow
 
@@ -325,6 +333,7 @@ Then verify the two real event paths:
 | `curl` or seclog gets `403 forbidden` from ntfy | Your ntfy server requires auth and `NTFY_TOKEN` is missing or invalid. Put a valid `tk_...` token into `~/.config/seclog-linux/config`, then run `seclog-restart`. |
 | Login banner does not appear on SSH | `.bashrc` only runs for interactive shell sessions. Test with `ssh -t host`. |
 | Failed-login pushes do not arrive | Check `systemctl --user status seclog-linux-fail-monitor` and `journalctl --user -u seclog-linux-fail-monitor -n 50`. |
+| Login history or failed-attempt summaries stay empty | Your user may not be allowed to read system SSH logs. On affected distros, add the user to `systemd-journal`, then log out and back in: `sudo usermod -aG systemd-journal "$USER"` |
 | Failed-login monitor stops after logout | Run `sudo loginctl enable-linger "$USER"` once. |
 | Public `ntfy.sh` works, but you are leaking too much metadata | Use a self-hosted ntfy server. The payload includes username, client IP, group membership and SSH key fingerprint. |
 | The service starts, but sees no failures | Verify that your distro logs SSH failures to `journalctl` for `sshd` or `sshd-session`. |
@@ -363,6 +372,8 @@ config and state cache untouched.
 - The SSH key *fingerprint* in the push is a SHA256 of the **public** key —
   it cannot be used to impersonate you. It's useful as an authenticity anchor:
   a fingerprint you don't recognize = unknown device logging in.
+- If you want lower disclosure in notifications, set
+  `PUSH_METADATA_LEVEL="minimal"` in `~/.config/seclog-linux/config`.
 - ntfy over plain HTTP within a trusted LAN is acceptable; for anything
   traversing the internet, put TLS in front of it.
 - The daemon rate-limits pushes to one per source-IP per 5 minutes (configurable

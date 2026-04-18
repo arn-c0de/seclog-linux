@@ -17,3 +17,12 @@ FAIL_LOOKBACK="24 hours ago"
 # Rate-limit window for failed-login pushes, in seconds (default 300 = 5 min).
 # During brute-force, at most one push per source-IP per window.
 FAIL_RATELIMIT_WINDOW=300
+
+# Max seconds to spend reading journal data during interactive SSH login.
+# Lower values reduce login delay if journald is slow.
+LOGIN_JOURNAL_TIMEOUT=2
+
+# Push payload detail level:
+#   full    = include UID, groups, client reverse-DNS, SSH key fingerprint, TTY
+#   minimal = omit extra identity/system metadata and keep only essential context
+PUSH_METADATA_LEVEL="full"

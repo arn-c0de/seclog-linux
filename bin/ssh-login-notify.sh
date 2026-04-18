@@ -9,13 +9,23 @@ CONFIG="${SSH_NOTIFY_CONFIG:-$HOME/.config/seclog-linux/config}"
 
 : "${NTFY_URL:?NTFY_URL not set — configure $CONFIG}"
 FAIL_LOOKBACK="${FAIL_LOOKBACK:-24 hours ago}"
+LOGIN_JOURNAL_TIMEOUT="${LOGIN_JOURNAL_TIMEOUT:-2}"
+PUSH_METADATA_LEVEL="${PUSH_METADATA_LEVEL:-full}"
+
+journalctl_ssh() {
+    timeout "$LOGIN_JOURNAL_TIMEOUT" journalctl --no-pager "$@" 2>/dev/null
+}
+
+journal_access_may_be_limited() {
+    [ "$(id -u)" -ne 0 ] && ! id -nG 2>/dev/null | grep -qw systemd-journal
+}
 
 read -r CIP CPORT SIP SPORT <<< "$SSH_CONNECTION"
 
 CHOST=$(timeout 1 getent hosts "$CIP" 2>/dev/null | awk '{print $2; exit}')
 [ -z "$CHOST" ] && CHOST="(no rDNS)"
 
-AUTH_LINE=$(journalctl --no-pager -r _COMM=sshd-session 2>/dev/null | \
+AUTH_LINE=$(journalctl_ssh -r _COMM=sshd-session | \
     grep -m1 "Accepted .* for $USER from $CIP")
 AUTH_METHOD=$(echo "$AUTH_LINE" | awk '{for(i=1;i<=NF;i++) if($i=="Accepted") print $(i+1)}')
 KEY_FP=$(echo "$AUTH_LINE" | grep -oE 'SHA256:[A-Za-z0-9+/=]+' | head -1)
@@ -58,7 +68,7 @@ echo
 
 # ── 2) Last 5 successful logins (distinct IPs) ──
 echo "$C_BLD$C_GRN── Last 5 successful logins (distinct IPs) ──$C_OFF"
-journalctl --no-pager -r _COMM=sshd-session 2>/dev/null | awk '
+LAST_LOGINS=$(journalctl_ssh -r _COMM=sshd-session | awk '
     /Accepted/ {
         for (i=1; i<=NF; i++) if ($i=="from") {
             ip=$(i+1); user=$(i-1); date=$1" "$2" "$3
@@ -67,11 +77,18 @@ journalctl --no-pager -r _COMM=sshd-session 2>/dev/null | awk '
                 n++; if (n>=5) exit
             }
         }
-    }'
+    }')
+if [ -n "$LAST_LOGINS" ]; then
+    printf '%s\n' "$LAST_LOGINS"
+elif journal_access_may_be_limited; then
+    echo "  (journal access unavailable; add user to systemd-journal)"
+else
+    echo "  (none)"
+fi
 echo
 
 # ── 3) Failed attempts in lookback window ──
-FAIL_SUMMARY=$(journalctl --no-pager --since "$FAIL_LOOKBACK" _COMM=sshd-session _COMM=sshd 2>/dev/null | \
+FAIL_SUMMARY=$(journalctl_ssh --since "$FAIL_LOOKBACK" _COMM=sshd-session _COMM=sshd | \
     awk '
     /Failed password for|Invalid user|authentication failure/ {
         ip=""; user=""
@@ -95,23 +112,35 @@ if [ -n "$FAIL_SUMMARY" ]; then
     TOTAL_FAILS=$(echo "$FAIL_SUMMARY" | awk -F'|' '{s+=$1} END{print s}')
     echo "$C_BLD$C_RED── ⚠ Failed SSH attempts ($FAIL_LOOKBACK): $TOTAL_FAILS from $FAIL_LINES IP(s) ──$C_OFF"
     echo "$FAIL_SUMMARY" | awk -F'|' '{printf "  %3dx  %-16s  %-20s  user=%s\n", $1, $2, $3, $4}'
+elif journal_access_may_be_limited; then
+    echo "$C_BLD$C_YEL── Failed SSH attempts ($FAIL_LOOKBACK): unavailable (needs journal access) ──$C_OFF"
 else
     echo "$C_BLD$C_YEL── Failed SSH attempts ($FAIL_LOOKBACK): none ──$C_OFF"
 fi
 echo
 
 # ── Push body ──
-BODY=$(printf 'User:   %s (uid=%s)%s\nFrom:   %s:%s\nHost:   %s\nAuth:   %s %s\nKey:    %s\nTTY:    %s\nGroups: %s\n\nActive sessions: %s (%s)\nFailed 24h: %s from %s IP(s)\n\nTime:   %s' \
-    "$USER" "$UID_NUM" "$SUDO_HINT" \
-    "$CIP" "$CPORT" \
-    "$CHOST" \
-    "${AUTH_METHOD:-unknown}" "${KEY_TYPE}" \
-    "${KEY_FP:-n/a}" \
-    "$TTY_NAME" \
-    "$GROUPS_LIST" \
-    "$ACTIVE_COUNT" "${ACTIVE_IPS:-none}" \
-    "$TOTAL_FAILS" "$FAIL_LINES" \
-    "$TIMESTAMP")
+if [ "$PUSH_METADATA_LEVEL" = "minimal" ]; then
+    BODY=$(printf 'User:   %s%s\nFrom:   %s:%s\nAuth:   %s %s\n\nActive sessions: %s (%s)\nFailed 24h: %s from %s IP(s)\n\nTime:   %s' \
+        "$USER" "$SUDO_HINT" \
+        "$CIP" "$CPORT" \
+        "${AUTH_METHOD:-unknown}" "${KEY_TYPE}" \
+        "$ACTIVE_COUNT" "${ACTIVE_IPS:-none}" \
+        "$TOTAL_FAILS" "$FAIL_LINES" \
+        "$TIMESTAMP")
+else
+    BODY=$(printf 'User:   %s (uid=%s)%s\nFrom:   %s:%s\nHost:   %s\nAuth:   %s %s\nKey:    %s\nTTY:    %s\nGroups: %s\n\nActive sessions: %s (%s)\nFailed 24h: %s from %s IP(s)\n\nTime:   %s' \
+        "$USER" "$UID_NUM" "$SUDO_HINT" \
+        "$CIP" "$CPORT" \
+        "$CHOST" \
+        "${AUTH_METHOD:-unknown}" "${KEY_TYPE}" \
+        "${KEY_FP:-n/a}" \
+        "$TTY_NAME" \
+        "$GROUPS_LIST" \
+        "$ACTIVE_COUNT" "${ACTIVE_IPS:-none}" \
+        "$TOTAL_FAILS" "$FAIL_LINES" \
+        "$TIMESTAMP")
+fi
 
 curl -fsS -m 3 \
     -H "Title: SSH login: $USER@$(hostname) from $CIP" \
