@@ -6,6 +6,7 @@
 #   ~/.local/bin/ssh-failed-monitor.sh (systemd user service)
 #   ~/.local/bin/seclog                (interactive CLI)
 #   ~/.local/bin/seclog-update         (git update helper)
+#   ~/.local/bin/seclog-restart        (service restart helper)
 #   ~/.config/seclog-linux/config    (your NTFY_URL + token)
 #   ~/.config/systemd/user/seclog-linux-fail-monitor.service
 #
@@ -26,6 +27,7 @@ install -m 0755 "$SRC/bin/ssh-login-notify.sh"    "$BIN/ssh-login-notify.sh"
 install -m 0755 "$SRC/bin/ssh-failed-monitor.sh"  "$BIN/ssh-failed-monitor.sh"
 install -m 0755 "$SRC/bin/seclog"                 "$BIN/seclog"
 install -m 0755 "$SRC/bin/seclog-update"          "$BIN/seclog-update"
+install -m 0755 "$SRC/bin/seclog-restart"         "$BIN/seclog-restart"
 echo "✓ scripts installed to $BIN"
 
 # Config: copy example if user has no config yet

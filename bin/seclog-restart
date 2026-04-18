@@ -1,0 +1,11 @@
+#!/bin/bash
+# Reload and restart the seclog-linux failed-login monitor user service.
+
+set -euo pipefail
+
+SERVICE="seclog-linux-fail-monitor.service"
+
+echo "== seclog-restart =="
+systemctl --user daemon-reload
+systemctl --user restart "$SERVICE"
+echo "Service: $(systemctl --user is-active "$SERVICE")"
