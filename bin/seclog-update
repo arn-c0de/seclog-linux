@@ -75,8 +75,14 @@ echo "Target:  $REMOTE_SHORT"
 
 if [ "$VERIFY_UPDATE_SIGNATURES" = "1" ]; then
     echo "Verify:  commit signature required"
-    git verify-commit "$REMOTE_COMMIT" >/dev/null
-    echo "Verify:  signature ok"
+    VERIFY_OUTPUT="$(git verify-commit "$REMOTE_COMMIT" 2>&1)"
+    VERIFY_SIGNER="$(printf '%s\n' "$VERIFY_OUTPUT" | awk '/^Good "git" signature for / {sub(/^Good "git" signature for /, "", $0); print; exit}')"
+    if [ -n "$VERIFY_SIGNER" ]; then
+        echo "VERIFIED: yes"
+        echo "Signer:   $VERIFY_SIGNER"
+    else
+        echo "VERIFIED: yes"
+    fi
 fi
 
 if [ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]; then
