@@ -41,45 +41,92 @@ TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S %Z')
 
 C_RED=$'\033[31m'; C_GRN=$'\033[32m'; C_YEL=$'\033[33m'; C_BLU=$'\033[34m'; C_OFF=$'\033[0m'; C_BLD=$'\033[1m'
 
-# ── 1) Active SSH connections (network-level via ss) ──
-SSH_PORT=$(awk '/^Port / {print $2; exit}' /etc/ssh/sshd_config 2>/dev/null)
-[ -z "$SSH_PORT" ] && SSH_PORT=22
+# Returns country string for an IP, or [LAN] for private ranges.
+# Requires: geoip-bin + geoip-database (apt install geoip-bin geoip-database)
+geo_lookup() {
+    local ip="$1" second
+    # Strip IPv6-mapped IPv4: [::ffff:1.2.3.4] -> 1.2.3.4
+    ip="${ip#\[}"; ip="${ip%\]}"; ip="${ip#::ffff:}"; ip="${ip#::FFFF:}"
+    case "$ip" in
+        127.*|10.*|169.254.*|::1|fe80*) echo "[LAN]"; return ;;
+        192.168.*)                       echo "[LAN]"; return ;;
+        172.*)
+            second=$(printf '%s' "$ip" | cut -d. -f2)
+            { [ "$second" -ge 16 ] && [ "$second" -le 31 ]; } 2>/dev/null && { echo "[LAN]"; return; }
+            ;;
+    esac
+    command -v geoiplookup >/dev/null 2>&1 || return
+    geoiplookup "$ip" 2>/dev/null \
+        | awk -F': ' '/Country Edition/ { sub(/^[[:space:]]+/,"",$2); print $2; exit }'
+}
 
-ACTIVE_LINES=$(ss -tn state established "( sport = :$SSH_PORT )" 2>/dev/null | \
-    awk 'NR>1 {print $4}' | awk -F: '{port=$NF; $NF=""; ip=$0; sub(/:$/,"",ip); print ip, port}')
+# ── 1) All active connections (grouped by app + target) ──
+_CONNS_RAW=$(ss -tnp 2>/dev/null | awk '
+$1 == "ESTAB" {
+    local = $4; peer = $5
+    pname = "-"
+    rest = ""; for (i = 6; i <= NF; i++) rest = rest $i
+    if (match(rest, /"[^"]+"/)) pname = substr(rest, RSTART+1, RLENGTH-2)
+    nl = split(local, la, ":"); lport = la[nl]+0
+    np = split(peer,  pa, ":"); pport = pa[np]+0
+    dir = (lport <= pport) ? "IN" : "OUT"
+    if (dir == "IN") {
+        peer_ip = peer; sub(/:[^:]+$/, "", peer_ip)
+        key = dir "|" peer_ip "|" lport "|" pname
+    } else {
+        key = dir "|" peer "|" pname
+    }
+    count[key]++
+}
+END { for (k in count) printf "%s|%d\n", k, count[k] }' \
+| sort -t'|' -k1,1r -k2,2)
 
-ACTIVE_COUNT=$(echo -n "$ACTIVE_LINES" | grep -c . )
-ACTIVE_IPS=$(echo "$ACTIVE_LINES" | awk '{print $1}' | sort -u | paste -sd "," -)
+ACTIVE_COUNT=$(ss -tnp 2>/dev/null | grep -c ESTAB)
+ACTIVE_IPS=$(ss -tnp 2>/dev/null | awk '$1=="ESTAB"{
+    nl=split($4,la,":"); np=split($5,pa,":")
+    if (la[nl]+0 <= pa[np]+0) { ip=$5; sub(/:[^:]+$/,"",ip); print ip }
+}' | sort -u | paste -sd',' -)
 
-echo "$C_BLD$C_BLU── Currently active SSH connections ($ACTIVE_COUNT) ──$C_OFF"
-if [ -n "$ACTIVE_LINES" ]; then
-    while read -r ip port; do
-        [ -z "$ip" ] && continue
-        whoinfo=$(who 2>/dev/null | grep -F "($ip)" | head -1)
-        u=$(echo "$whoinfo" | awk '{print $1}')
-        t=$(echo "$whoinfo" | awk '{for(i=2;i<=NF-1;i++) printf "%s ", $i}')
-        [ -z "$u" ] && u="?"
-        printf '  %-16s  %-6s  %-10s  %s\n' "$ip" "$port" "$u" "$t"
-    done <<< "$ACTIVE_LINES"
+echo "$C_BLD$C_BLU── All active connections ($ACTIVE_COUNT) ──$C_OFF"
+if [ -n "$_CONNS_RAW" ]; then
+    while IFS='|' read -r dir a b c cnt; do
+        [ -z "$dir" ] && continue
+        if [ "$dir" = "IN" ]; then
+            geo=$(geo_lookup "$a")
+            users=$(who 2>/dev/null | grep -F "($a)" | awk '{print $1}' | sort -u | paste -sd',' -)
+            echo "  [IN ]  $a -> :$b"
+            echo "         app: $c  |  ${geo:-(unknown)}${users:+  |  $users}"
+        else
+            peer_ip="${a%%:*}"
+            geo=$(geo_lookup "$peer_ip")
+            n="${c:-1}"
+            echo "  [OUT]  $a"
+            printf '         app: %s  |  %s%s\n' "$b" "${geo:-(unknown)}" "$([ "$n" -gt 1 ] 2>/dev/null && echo " (${n}x)")"
+        fi
+        echo
+    done <<< "$_CONNS_RAW"
 else
     echo "  (none)"
+    echo
 fi
-echo
 
 # ── 2) Last 5 successful logins (distinct IPs) ──
 echo "$C_BLD$C_GRN── Last 5 successful logins (distinct IPs) ──$C_OFF"
-LAST_LOGINS=$(journalctl_ssh -r _COMM=sshd-session | awk '
+LAST_LOGINS_RAW=$(journalctl_ssh -r _COMM=sshd-session | awk '
     /Accepted/ {
         for (i=1; i<=NF; i++) if ($i=="from") {
             ip=$(i+1); user=$(i-1); date=$1" "$2" "$3
             if (!seen[ip]++) {
-                printf "  %-16s  %-12s  %s\n", date, user, ip
+                printf "%s|%s|%s\n", date, user, ip
                 n++; if (n>=5) exit
             }
         }
     }')
-if [ -n "$LAST_LOGINS" ]; then
-    printf '%s\n' "$LAST_LOGINS"
+if [ -n "$LAST_LOGINS_RAW" ]; then
+    while IFS='|' read -r date user ip; do
+        geo=$(geo_lookup "$ip")
+        printf '  %-16s  %-12s  %-18s  %s\n' "$date" "$user" "$ip" "${geo:-(unknown)}"
+    done <<< "$LAST_LOGINS_RAW"
 elif journal_access_may_be_limited; then
     echo "  (journal access unavailable; add user to systemd-journal)"
 else
@@ -117,6 +164,12 @@ elif journal_access_may_be_limited; then
 else
     echo "$C_BLD$C_YEL── Failed SSH attempts ($FAIL_LOOKBACK): none ──$C_OFF"
 fi
+echo
+
+echo "$C_BLD$C_BLU── Admin Commands ──$C_OFF"
+echo "  sudo firewall-status       → UFW + ipset + iptables overview"
+echo "  sudo ufw status numbered   → UFW rules numbered"
+echo "  sudo ipset list            → device groups"
 echo
 
 # ── Push body ──
