@@ -364,21 +364,42 @@ when your last session ends. For 24/7 operation, enable lingering **once**:
 sudo loginctl enable-linger "$USER"
 ```
 
-## Self-hosted ntfy (recommended for sensitive data)
+## Self-hosted ntfy (strongly recommended)
 
-Your push payload contains your username, client IP, SSH key fingerprint and
-group membership — don't publish that to the public `ntfy.sh`. Use a
-self-hosted ntfy inside your LAN or behind a TLS reverse proxy.
+**Do not use the public `ntfy.sh` server for seclog-linux.**
 
-See `ntfy/server.yml.example` for a hardened config: `auth-default-access: deny-all`
-plus generous home-server rate limits. Create users and tokens:
+Every login push contains your username, UID, group membership, client IP,
+reverse-DNS hostname, SSH key fingerprint and TTY. Sending that to a
+third-party server means:
+
+- A public ntfy topic is readable by anyone who knows the topic name.
+- Even a token-protected topic sends your payload through infrastructure you
+  do not control, where it may be logged or retained.
+- In the event of a breach or data request, your SSH access patterns and
+  device fingerprints are exposed.
+
+Run ntfy on a machine you own — a Raspberry Pi on your LAN is enough:
+
+```bash
+docker run -d --name ntfy \
+  -v /path/to/ntfy-data:/var/lib/ntfy \
+  -p 2586:80 \
+  binwiederhier/ntfy serve --config /etc/ntfy/server.yml
+```
+
+See `ntfy/server.yml.example` for a hardened config with
+`auth-default-access: deny-all` and sensible rate limits.
+
+Create a user and token:
 
 ```bash
 docker exec -it ntfy ntfy user add --role=admin admin
 docker exec ntfy ntfy token add admin
 ```
 
-Use the resulting `tk_…` token as `NTFY_TOKEN` in the config.
+Set the resulting `tk_…` token as `NTFY_TOKEN` in `~/.config/seclog-linux/config`
+and point `NTFY_URL` at your own instance. Keep ntfy behind a TLS reverse proxy
+(nginx, Caddy) if you expose it outside your LAN.
 
 ## Verification
 
