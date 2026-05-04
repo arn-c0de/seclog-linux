@@ -9,7 +9,6 @@ REPO_DIR="${SECLOG_REPO_DIR:-$HOME/Projects/seclog-linux}"
 SERVICE="seclog-linux-fail-monitor.service"
 CONFIG="${SSH_NOTIFY_CONFIG:-$HOME/.config/seclog-linux/config}"
 ALLOW_CUSTOM_REPO_DIR="${ALLOW_CUSTOM_REPO_DIR:-0}"
-VERIFY_UPDATE_SIGNATURES="${VERIFY_UPDATE_SIGNATURES:-0}"
 EXPECTED_UPDATE_ORIGIN="${EXPECTED_UPDATE_ORIGIN:-https://github.com/arn-c0de/seclog-linux.git}"
 EXPECTED_UPDATE_ORIGIN_ALT="${EXPECTED_UPDATE_ORIGIN_ALT:-git@github.com:arn-c0de/seclog-linux.git}"
 
@@ -76,17 +75,17 @@ echo "Current: $LOCAL_SHORT"
 echo "Target:  $REMOTE_SHORT"
 echo "Message: $REMOTE_SUBJECT"
 
-if [ "$VERIFY_UPDATE_SIGNATURES" = "1" ]; then
-    echo "Verify:  commit signature required"
-    VERIFY_OUTPUT="$(git verify-commit "$REMOTE_COMMIT" 2>&1)"
-    VERIFY_SIGNER="$(printf '%s\n' "$VERIFY_OUTPUT" | awk '/^Good "git" signature for / {sub(/^Good "git" signature for /, "", $0); print; exit}')"
-    if [ -n "$VERIFY_SIGNER" ]; then
-        echo "VERIFIED: yes"
-        echo "Signer:   $VERIFY_SIGNER"
-    else
-        echo "VERIFIED: yes"
-    fi
+echo "Verify:  commit signature required"
+VERIFY_OUTPUT="$(git verify-commit "$REMOTE_COMMIT" 2>&1)"
+VERIFY_STATUS=$?
+VERIFY_SIGNER="$(printf '%s\n' "$VERIFY_OUTPUT" | awk '/^Good "git" signature for / {sub(/^Good "git" signature for /, ""); print; exit}')"
+if [ $VERIFY_STATUS -ne 0 ] || [ -z "$VERIFY_SIGNER" ]; then
+    echo "VERIFIED: NO — aborting" >&2
+    printf '%s\n' "$VERIFY_OUTPUT" >&2
+    exit 1
 fi
+echo "VERIFIED: yes"
+echo "Signer:   $VERIFY_SIGNER"
 
 if [ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]; then
     echo "Update:  available"

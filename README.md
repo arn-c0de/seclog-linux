@@ -272,9 +272,6 @@ ALLOW_CUSTOM_REPO_DIR=0
 # Expected origin remotes for seclog-update
 EXPECTED_UPDATE_ORIGIN="https://github.com/arn-c0de/seclog-linux.git"
 EXPECTED_UPDATE_ORIGIN_ALT="git@github.com:arn-c0de/seclog-linux.git"
-
-# Require signed commits for seclog-update
-VERIFY_UPDATE_SIGNATURES=0
 ```
 
 What the settings do:
@@ -287,7 +284,6 @@ What the settings do:
 - `PUSH_METADATA_LEVEL`: Set to `minimal` to omit UID, groups, reverse-DNS host, TTY and SSH key fingerprint from login pushes.
 - `ALLOW_CUSTOM_REPO_DIR`: Keeps `seclog-update` pinned to `~/Projects/seclog-linux` unless you explicitly allow another checkout path.
 - `EXPECTED_UPDATE_ORIGIN` / `EXPECTED_UPDATE_ORIGIN_ALT`: `seclog-update` aborts if `origin` does not match one of these remotes.
-- `VERIFY_UPDATE_SIGNATURES`: When set to `1`, `seclog-update` requires `git verify-commit` to succeed for the target commit before applying it.
 
 `PUSH_METADATA_LEVEL` changes the login push payload like this:
 
@@ -330,14 +326,15 @@ Security behavior of `seclog-update`:
 - It runs the installer via the absolute path inside the checked-out repository.
 - It refuses updates from unexpected `origin` remotes.
 - It refuses a custom `SECLOG_REPO_DIR` unless `ALLOW_CUSTOM_REPO_DIR=1` is set.
-- It can optionally enforce signed commits with `VERIFY_UPDATE_SIGNATURES=1`.
+- **Commit signature verification is mandatory.** `seclog-update` always runs
+  `git verify-commit` on the target commit and aborts if verification fails or
+  the signer cannot be identified. There is no opt-out.
 
 To use signed-update verification in practice:
 
 1. Configure your local repo to sign commits with a trusted key.
 2. Put the matching public key into an `allowed_signers` file on the target host.
-3. Set `VERIFY_UPDATE_SIGNATURES=1` in `~/.config/seclog-linux/config`.
-4. Run `seclog-update`. It will abort unless `git verify-commit` succeeds for the target commit.
+3. Run `seclog-update`. It aborts unless `git verify-commit` succeeds for the target commit.
 
 For the full trust model, threat boundaries and limits of this mechanism, see
 [SECURITY.md](SECURITY.md).
