@@ -19,13 +19,19 @@ have one notification stream for SSH visibility instead of separate tooling.
 On every successful SSH login, the user sees a colored banner:
 
 ```
-── Currently active SSH connections (2) ──
-  192.168.1.100    54123   alice      2026-04-18 19:46
-  203.0.113.55     52401   bob        2026-04-18 19:30
+── All active connections (4) ──
+  [IN ]  192.168.1.100 -> :2222
+         app: sshd-session  |  [LAN]  |  alice
+
+  [OUT]  203.0.113.55:443
+         app: curl  |  US, United States (3x)
+
+  [OUT]  192.168.1.50:8080
+         app: python3  |  [LAN]
 
 ── Last 5 successful logins (distinct IPs) ──
-  Apr 18 19:46:12   alice        192.168.1.100
-  Apr 18 18:22:01   alice        203.0.113.55
+  Apr 18 19:46:12   alice        192.168.1.100     [LAN]
+  Apr 18 18:22:01   alice        203.0.113.55      US, United States
   ...
 
 ── ⚠ Failed SSH attempts (24 hours ago): 37 from 4 IP(s) ──
@@ -33,6 +39,12 @@ On every successful SSH login, the user sees a colored banner:
     8x  Apr 17 22:01:15  91.200.12.3           user=admin
   ...
 ```
+
+The active connections section shows **all** established TCP connections, not
+just SSH — grouped by app and remote target, with direction (`IN`/`OUT`) and
+country via a local GeoIP database. Private IP ranges are labelled `[LAN]`
+without a lookup. Multiple connections to the same destination are collapsed
+into one line with a repeat count.
 
 And a push to your phone:
 
@@ -145,6 +157,13 @@ history for everything related to SSH access.
 - Linux with `systemd` + `journalctl`
 - `bash`, `curl`, `awk`, `ss`, `who`, `getent` (all part of any typical server install)
 - An ntfy instance — either the public `https://ntfy.sh` or a self-hosted one
+- **Optional:** `geoip-bin` + `geoip-database` for country lookup in the active connections banner
+
+  ```bash
+  sudo apt install geoip-bin geoip-database
+  ```
+
+  Without these packages the geo column is simply omitted — everything else works normally.
 
 ## Quickstart
 
