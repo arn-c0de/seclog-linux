@@ -25,9 +25,11 @@ mkdir -p "$BIN" "$CFG_DIR" "$SYSD_DIR" "$HOME/.cache/ssh-fail"
 
 install -m 0755 "$SRC/bin/ssh-login-notify.sh"    "$BIN/ssh-login-notify.sh"
 install -m 0755 "$SRC/bin/ssh-failed-monitor.sh"  "$BIN/ssh-failed-monitor.sh"
+install -m 0644 "$SRC/bin/seclog-lib.sh"          "$BIN/seclog-lib.sh"
 install -m 0755 "$SRC/bin/seclog"                 "$BIN/seclog"
 install -m 0755 "$SRC/bin/seclog-update"          "$BIN/seclog-update"
 install -m 0755 "$SRC/bin/seclog-restart"         "$BIN/seclog-restart"
+install -m 0755 "$SRC/bin/seclog-diagnose"        "$BIN/seclog-diagnose"
 echo "✓ scripts installed to $BIN"
 
 # Config: copy example if user has no config yet
@@ -77,11 +79,27 @@ fi
 
 # Enable & start the failed-monitor service
 systemctl --user daemon-reload
-systemctl --user enable --now seclog-linux-fail-monitor.service >/dev/null 2>&1 || true
-if systemctl --user is-active seclog-linux-fail-monitor.service >/dev/null 2>&1; then
+if systemctl --user enable --now seclog-linux-fail-monitor.service 2>/dev/null; then
     echo "✓ seclog-linux-fail-monitor.service running"
 else
-    echo "⚠ seclog-linux-fail-monitor.service not running — check: systemctl --user status seclog-linux-fail-monitor"
+    echo "✗ seclog-linux-fail-monitor.service failed to start" >&2
+    echo "  Run: systemctl --user status seclog-linux-fail-monitor" >&2
+    exit 1
+fi
+
+# Validate NTFY_URL if config already has a real value
+if [ -f "$CFG_DIR/config" ]; then
+    _NTFY_URL=$(grep -E '^NTFY_URL=' "$CFG_DIR/config" | cut -d'"' -f2)
+    if [ -n "$_NTFY_URL" ] && [ "$_NTFY_URL" != "http://YOUR_NTFY_HOST:2586/YOUR_TOPIC" ]; then
+        _NTFY_TOKEN=$(grep -E '^NTFY_TOKEN=' "$CFG_DIR/config" | cut -d'"' -f2)
+        _AUTH=${_NTFY_TOKEN:+-H "Authorization: Bearer $_NTFY_TOKEN"}
+        if curl -fsS -m 5 ${_AUTH:+"$_AUTH"} -d "seclog-linux install test" "$_NTFY_URL" >/dev/null 2>&1; then
+            echo "✓ ntfy reachable — test push sent to $_NTFY_URL"
+        else
+            echo "⚠ ntfy unreachable or auth failed: $_NTFY_URL"
+            echo "  Check NTFY_URL and NTFY_TOKEN in $CFG_DIR/config"
+        fi
+    fi
 fi
 
 cat << EOF
@@ -90,13 +108,15 @@ cat << EOF
 1. Edit your config:  $CFG_DIR/config
    Set NTFY_URL and (optionally) NTFY_TOKEN.
 
-2. Update later from a git checkout with:
-     SECLOG_REPO_DIR="$SRC" seclog-update
+2. Run seclog to check the local banner:
+     seclog
 
-3. For persistent fail-monitor (survives logout), run ONCE as root:
-     sudo loginctl enable-linger \$USER
+3. Re-login via SSH to test the full flow (banner + push).
 
-4. Test with:  seclog
-   Re-login via SSH to see the banner + receive a push.
+4. For persistent fail-monitor (survives logout), run once:
+     sudo loginctl enable-linger $USER
+
+5. Update later from this checkout:
+     seclog-update
 
 EOF
