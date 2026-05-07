@@ -35,7 +35,3 @@ ALLOW_CUSTOM_REPO_DIR=0
 # match one of these values.
 EXPECTED_UPDATE_ORIGIN="https://github.com/arn-c0de/seclog-linux.git"
 EXPECTED_UPDATE_ORIGIN_ALT="git@github.com:arn-c0de/seclog-linux.git"
-
-# Require `git verify-commit` to succeed for the target commit before applying
-# an update. Enable this only after you have configured trusted signing keys.
-VERIFY_UPDATE_SIGNATURES=0

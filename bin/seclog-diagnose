@@ -1,0 +1,82 @@
+#!/bin/bash
+# seclog-diagnose — check that all seclog-linux dependencies and config are healthy.
+
+CONFIG="${SSH_NOTIFY_CONFIG:-$HOME/.config/seclog-linux/config}"
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+PASS=0; WARN=0; FAIL=0
+
+ok()   { echo "  [OK ]  $*"; PASS=$((PASS+1)); }
+warn() { echo "  [WARN]  $*"; WARN=$((WARN+1)); }
+fail() { echo "  [FAIL]  $*"; FAIL=$((FAIL+1)); }
+
+echo "── seclog-linux diagnostics ──"
+echo
+
+echo "[ Prerequisites ]"
+for cmd in bash curl awk ss who getent timeout journalctl git; do
+    command -v "$cmd" >/dev/null 2>&1 && ok "$cmd found" || fail "$cmd not found"
+done
+command -v geoiplookup >/dev/null 2>&1 \
+    && ok "geoiplookup found (geo-location active)" \
+    || warn "geoiplookup not found — install: sudo apt install geoip-bin geoip-database"
+echo
+
+echo "[ Config ]"
+if [ -f "$CONFIG" ]; then
+    ok "config found: $CONFIG"
+else
+    fail "config missing: $CONFIG — run install.sh first"
+fi
+
+if [ -z "${NTFY_URL:-}" ] || [ "$NTFY_URL" = "http://YOUR_NTFY_HOST:2586/YOUR_TOPIC" ]; then
+    fail "NTFY_URL not configured in $CONFIG"
+else
+    ok "NTFY_URL set: $NTFY_URL"
+fi
+echo
+
+echo "[ Network ]"
+if [ -n "${NTFY_URL:-}" ] && [ "$NTFY_URL" != "http://YOUR_NTFY_HOST:2586/YOUR_TOPIC" ]; then
+    _AUTH=${NTFY_TOKEN:+-H "Authorization: Bearer $NTFY_TOKEN"}
+    if curl -fsS -m 5 ${_AUTH:+"$_AUTH"} -d "seclog-diagnose test" "$NTFY_URL" >/dev/null 2>&1; then
+        ok "ntfy reachable and accepted test push"
+    else
+        fail "ntfy unreachable or auth failed — check NTFY_URL and NTFY_TOKEN"
+    fi
+else
+    warn "skipping ntfy connectivity check (NTFY_URL not configured)"
+fi
+echo
+
+echo "[ Permissions ]"
+if id -nG 2>/dev/null | grep -qw systemd-journal; then
+    ok "user is in systemd-journal group"
+else
+    warn "user not in systemd-journal — SSH log history may be empty"
+    warn "  fix: sudo usermod -aG systemd-journal \$USER  (then re-login)"
+fi
+
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ok "\$HOME/.local/bin is in PATH" ;;
+    *) warn "\$HOME/.local/bin is NOT in PATH — add to .profile: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+esac
+echo
+
+echo "[ Systemd service ]"
+if systemctl --user is-active seclog-linux-fail-monitor.service >/dev/null 2>&1; then
+    ok "seclog-linux-fail-monitor.service is active"
+else
+    fail "seclog-linux-fail-monitor.service is NOT running"
+    echo "       run: systemctl --user status seclog-linux-fail-monitor"
+fi
+
+if systemctl --user is-enabled seclog-linux-fail-monitor.service >/dev/null 2>&1; then
+    ok "seclog-linux-fail-monitor.service is enabled"
+else
+    warn "seclog-linux-fail-monitor.service is not enabled (won't auto-start)"
+fi
+echo
+
+echo "── Result: $PASS ok, $WARN warnings, $FAIL failures ──"
+[ "$FAIL" -gt 0 ] && exit 1 || exit 0
