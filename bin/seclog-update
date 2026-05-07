@@ -75,6 +75,12 @@ echo "Current: $LOCAL_SHORT"
 echo "Target:  $REMOTE_SHORT"
 echo "Message: $REMOTE_SUBJECT"
 
+if [ "$LOCAL_COMMIT" = "$REMOTE_COMMIT" ]; then
+    echo "Update:  already up to date"
+    echo "Commit:  $LOCAL_SHORT ($LOCAL_SUBJECT)"
+    exit 0
+fi
+
 echo "Verify:  commit signature required"
 VERIFY_OUTPUT="$(git verify-commit "$REMOTE_COMMIT" 2>&1)"
 VERIFY_STATUS=$?
@@ -87,24 +93,18 @@ fi
 echo "VERIFIED: yes"
 echo "Signer:   $VERIFY_SIGNER"
 
-if [ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]; then
-    echo "Update:  available"
-    printf "Proceed with update? [y/N] "
-    read -r confirm
-    case "$confirm" in
-        y|Y) ;;
-        *)
-            echo "Aborted."
-            exit 0
-            ;;
-    esac
-    echo "Updating: $LOCAL_SHORT -> $REMOTE_SHORT"
-    git pull --ff-only origin "$BRANCH"
-else
-    echo "Update:  already up to date"
-    echo "Commit:  $LOCAL_SHORT ($LOCAL_SUBJECT)"
-    exit 0
-fi
+echo "Update:  available"
+printf "Proceed with update? [y/N] "
+read -r confirm
+case "$confirm" in
+    y|Y) ;;
+    *)
+        echo "Aborted."
+        exit 0
+        ;;
+esac
+echo "Updating: $LOCAL_SHORT -> $REMOTE_SHORT"
+git pull --ff-only origin "$BRANCH"
 
 /bin/bash "$INSTALL_SCRIPT"
 
