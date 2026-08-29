@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# seclog-login — SSH login banner + push notification.
+#
+# Started by the .bashrc hook on interactive SSH logins. It prints the security
+# report to the terminal and sends a push to ntfy in the background, so a slow
+# or unreachable ntfy server never delays the login.
+
+set -uo pipefail
+
+[[ -n ${SSH_CONNECTION:-} ]] || exit 0
+
+SECLOG_LIB="$(dirname "$(readlink -f "$0")")/seclog-lib.sh"
+[[ -f $SECLOG_LIB ]] || SECLOG_LIB="$HOME/.local/bin/seclog-lib.sh"
+# shellcheck source=seclog-lib.sh
+. "$SECLOG_LIB"
+
+seclog_load_config
+seclog_init_colors
+
+# ── Terminal report ───────────────────────────────────────────────────────
+seclog_print_report
+printf '\n'
+
+seclog_heading "$C_BLU" "Admin commands"
+cat <<'HELP'
+  sudo firewall-status       → UFW + ipset + iptables overview
+  sudo ufw status numbered   → UFW rules, numbered
+  sudo ipset list            → device groups
+HELP
+printf '\n'
+
+# ── Push notification ─────────────────────────────────────────────────────
+seclog_ntfy_configured || exit 0
+
+read -r client_ip client_port _server_ip _server_port <<<"$SSH_CONNECTION"
+
+# The `Accepted ...` line for this very session tells us how we authenticated.
+auth_line="$(seclog_journal -r _COMM=sshd-session |
+    grep -m1 -E "Accepted .* for $USER from $client_ip")"
+auth_method="$(awk '{ for (i = 1; i < NF; i++) if ($i == "Accepted") print $(i + 1) }' <<<"$auth_line")"
+key_type="$(grep -oE 'ED25519|RSA|ECDSA|DSA' <<<"$auth_line" | head -1)"
+key_fingerprint="$(grep -oE 'SHA256:[A-Za-z0-9+/=]+' <<<"$auth_line" | head -1)"
+
+auth_summary="${auth_method:-unknown}${key_type:+ $key_type}"
+sudo_hint=""
+id -nG 2>/dev/null | grep -qw sudo && sudo_hint=" (sudo)"
+
+if [[ $PUSH_METADATA_LEVEL == minimal ]]; then
+    body="$(printf 'User:   %s%s\nFrom:   %s:%s\nAuth:   %s\n\nActive sessions: %s (%s)\nFailed (%s): %s from %s IP(s)\n\nTime:   %s' \
+        "$USER" "$sudo_hint" \
+        "$client_ip" "$client_port" \
+        "$auth_summary" \
+        "$SECLOG_CONN_TOTAL" "${SECLOG_CONN_PEERS:-none}" \
+        "$FAIL_LOOKBACK" "$SECLOG_FAIL_TOTAL" "$SECLOG_FAIL_IPS" \
+        "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
+else
+    client_host="$(timeout 1 getent hosts "$client_ip" 2>/dev/null | awk '{ print $2; exit }')"
+    tty_name="${SSH_TTY:-$(tty 2>/dev/null)}"
+
+    body="$(printf 'User:   %s (uid=%s)%s\nFrom:   %s:%s\nHost:   %s\nAuth:   %s\nKey:    %s\nTTY:    %s\nGroups: %s\n\nActive sessions: %s (%s)\nFailed (%s): %s from %s IP(s)\n\nTime:   %s' \
+        "$USER" "$(id -u)" "$sudo_hint" \
+        "$client_ip" "$client_port" \
+        "${client_host:-(no rDNS)}" \
+        "$auth_summary" \
+        "${key_fingerprint:-n/a}" \
+        "${tty_name:-none}" \
+        "$(id -nG 2>/dev/null | tr ' ' ',')" \
+        "$SECLOG_CONN_TOTAL" "${SECLOG_CONN_PEERS:-none}" \
+        "$FAIL_LOOKBACK" "$SECLOG_FAIL_TOTAL" "$SECLOG_FAIL_IPS" \
+        "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
+fi
+
+seclog_push "SSH login: $USER@$(hostname) from $client_ip" "warning,key" "high" "$body" &
+disown 2>/dev/null || true

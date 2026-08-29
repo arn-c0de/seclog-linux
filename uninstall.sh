@@ -1,26 +1,54 @@
-#!/bin/bash
-# Uninstall seclog-linux. Removes scripts, systemd unit, and .bashrc hook.
-# Does NOT remove your config (edit or delete manually if you want).
+#!/usr/bin/env bash
+# Uninstall seclog-linux: stops the service, removes the installed commands and
+# the .bashrc hook. Config and cached state are kept — remove them by hand if
+# you want them gone (the paths are printed at the end).
 
-set -e
+set -euo pipefail
 
-BIN="$HOME/.local/bin"
-SYSD_DIR="$HOME/.config/systemd/user"
+BIN_DIR="$HOME/.local/bin"
+CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/seclog-linux"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/seclog-linux"
+BASHRC="$HOME/.bashrc"
 
-systemctl --user disable --now seclog-linux-fail-monitor.service >/dev/null 2>&1 || true
-rm -f "$SYSD_DIR/seclog-linux-fail-monitor.service"
+SERVICES=(seclog-monitor.service seclog-linux-fail-monitor.service)
+COMMANDS=(
+    seclog seclog-login seclog-monitor seclog-diagnose seclog-restart
+    seclog-update seclog-lib.sh
+    ssh-login-notify.sh ssh-failed-monitor.sh   # pre-rename releases
+)
+
+for service in "${SERVICES[@]}"; do
+    systemctl --user disable --now "$service" >/dev/null 2>&1 || true
+    rm -f "$UNIT_DIR/$service"
+done
 systemctl --user daemon-reload >/dev/null 2>&1 || true
+echo "✓ service stopped and unit removed"
 
-rm -f "$BIN/ssh-login-notify.sh" "$BIN/ssh-failed-monitor.sh" "$BIN/seclog" "$BIN/seclog-update" "$BIN/seclog-restart"
+for command in "${COMMANDS[@]}"; do
+    rm -f "$BIN_DIR/$command"
+done
+echo "✓ commands removed from $BIN_DIR"
 
-# Remove .bashrc hook
-if grep -q "seclog-linux:" "$HOME/.bashrc" 2>/dev/null; then
+if [[ -f $BASHRC ]] && grep -q '# seclog-linux:' "$BASHRC"; then
     tmp="$(mktemp)"
-    awk '/# seclog-linux:/{skip=2} skip>0{skip--; next} {print}' "$HOME/.bashrc" > "$tmp"
-    mv "$tmp" "$HOME/.bashrc"
+    awk '
+        /# seclog-linux:/ { skip = 2 }
+        skip > 0          { skip--; next }
+                          { line[++n] = $0 }
+        END {
+            while (n > 0 && line[n] ~ /^[[:space:]]*$/) n--
+            for (i = 1; i <= n; i++) print line[i]
+        }' "$BASHRC" >"$tmp"
+    cat "$tmp" >"$BASHRC"          # truncate in place, keeping mode and owner
+    rm -f "$tmp"
     echo "✓ .bashrc hook removed"
 fi
 
-echo "✓ seclog-linux uninstalled."
-echo "  Config kept at: $HOME/.config/seclog-linux/  (remove manually if unwanted)"
-echo "  State cache:    $HOME/.cache/ssh-fail/         (remove manually if unwanted)"
+cat <<EOT
+
+✓ seclog-linux uninstalled.
+  Config kept at:  $CFG_DIR
+  State kept at:   $CACHE_DIR
+  Old state dir:   $HOME/.cache/ssh-fail   (pre-rename releases)
+EOT

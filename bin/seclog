@@ -1,57 +1,50 @@
-#!/bin/bash
-# seclog — show current SSH security status (no push sent)
-# Usage: seclog [lookback]   e.g. seclog "1 hour ago"
+#!/usr/bin/env bash
+# seclog — show the current SSH security status. Read-only, sends no push.
 
-FAIL_LOOKBACK="${1:-24 hours ago}"
+set -uo pipefail
 
 SECLOG_LIB="$(dirname "$(readlink -f "$0")")/seclog-lib.sh"
-[ -f "$SECLOG_LIB" ] || SECLOG_LIB="$HOME/.local/bin/seclog-lib.sh"
+[[ -f $SECLOG_LIB ]] || SECLOG_LIB="$HOME/.local/bin/seclog-lib.sh"
 # shellcheck source=seclog-lib.sh
 . "$SECLOG_LIB"
 
-# ── 1) All active connections ──
-show_active_connections
+usage() {
+    cat <<'HELP'
+Usage: seclog [lookback]
 
-# ── 2) Last 5 successful logins ──
-echo "${C_BLD}${C_GRN}── Last 5 successful logins (distinct IPs) ──${C_OFF}"
-journalctl --no-pager -r _COMM=sshd-session 2>/dev/null | awk '
-    /Accepted/ {
-        for (i=1; i<=NF; i++) if ($i=="from") {
-            ip=$(i+1); user=$(i-1); date=$1" "$2" "$3
-            if (!seen[ip]++) {
-                printf "%s|%s|%s\n", date, user, ip
-                n++; if (n>=5) exit
-            }
-        }
-    }' | while IFS='|' read -r date user ip; do
-        geo=$(geo_lookup "$ip")
-        printf '  %-16s  %-12s  %-18s  %s\n' "$date" "$user" "$ip" "${geo:-(unknown)}"
-    done
-echo
+Shows active TCP connections, recent successful SSH logins and failed login
+attempts. Nothing is pushed to ntfy — use this to inspect the machine you are
+already on.
 
-# ── 3) Failed attempts ──
-FAIL_SUMMARY=$(journalctl --no-pager --since "$FAIL_LOOKBACK" _COMM=sshd-session _COMM=sshd 2>/dev/null | \
-    awk '
-    /Failed password for|Invalid user|authentication failure/ {
-        ip=""; user=""
-        for (i=1;i<=NF;i++) {
-            if ($i=="from") ip=$(i+1)
-            if ($i=="for") user=$(i+1)
-            if (user=="invalid" && $i=="user") user=$(i+1)
-        }
-        if (ip=="") next
-        key=ip"|"user
-        count[key]++
-        last[key]=$1" "$2" "$3
-    }
-    END { for (k in count) printf "%d|%s|%s\n", count[k], last[k], k }' \
-    | sort -t"|" -k1 -nr | head -10)
+Arguments:
+  lookback      How far back to scan for failed attempts, in any format
+                journalctl --since accepts. Default: the FAIL_LOOKBACK value
+                from the config, or "24 hours ago".
 
-if [ -n "$FAIL_SUMMARY" ]; then
-    FAIL_LINES=$(echo "$FAIL_SUMMARY" | wc -l)
-    TOTAL_FAILS=$(echo "$FAIL_SUMMARY" | awk -F'|' '{s+=$1} END{print s}')
-    echo "${C_BLD}${C_RED}── ⚠ Failed SSH attempts ($FAIL_LOOKBACK): $TOTAL_FAILS from $FAIL_LINES IP(s) ──${C_OFF}"
-    echo "$FAIL_SUMMARY" | awk -F'|' '{printf "  %3dx  %-16s  %-20s  user=%s\n", $1, $2, $3, $4}'
-else
-    echo "${C_BLD}${C_YEL}── Failed SSH attempts ($FAIL_LOOKBACK): none ──${C_OFF}"
-fi
+Options:
+  -h, --help    Show this help.
+  -V, --version Show the version.
+
+Examples:
+  seclog
+  seclog "1 hour ago"
+  seclog "2024-01-01"
+HELP
+}
+
+seclog_load_config
+seclog_init_colors
+
+# FAIL_LOOKBACK and JOURNAL_TIMEOUT are read back by the library functions.
+# shellcheck disable=SC2034
+case "${1:-}" in
+    -h|--help)    usage; exit 0 ;;
+    -V|--version) printf 'seclog %s\n' "$SECLOG_VERSION"; exit 0 ;;
+    -*)           printf 'seclog: unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+    ?*)           FAIL_LOOKBACK="$1" ;;
+esac
+
+# Interactive use can afford to wait longer for journald than a login banner.
+JOURNAL_TIMEOUT="${SECLOG_CLI_JOURNAL_TIMEOUT:-10}"
+
+seclog_print_report

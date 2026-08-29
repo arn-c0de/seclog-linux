@@ -1,0 +1,31 @@
+[Unit]
+Description=seclog-linux failed-login monitor (pushes to ntfy)
+Documentation=https://github.com/arn-c0de/seclog-linux
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/seclog-monitor
+Restart=always
+RestartSec=10
+
+# Hardening — the monitor only reads the journal and talks to ntfy.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CacheDirectory=seclog-linux
+ReadWritePaths=%C/seclog-linux
+
+[Install]
+WantedBy=default.target

@@ -1,82 +1,107 @@
-#!/bin/bash
-# seclog-diagnose — check that all seclog-linux dependencies and config are healthy.
+#!/usr/bin/env bash
+# seclog-diagnose — check that dependencies, config, permissions and the
+# background service are all healthy. Exits non-zero if anything failed.
 
-CONFIG="${SSH_NOTIFY_CONFIG:-$HOME/.config/seclog-linux/config}"
-[ -f "$CONFIG" ] && . "$CONFIG"
+set -uo pipefail
 
-PASS=0; WARN=0; FAIL=0
+SECLOG_LIB="$(dirname "$(readlink -f "$0")")/seclog-lib.sh"
+[[ -f $SECLOG_LIB ]] || SECLOG_LIB="$HOME/.local/bin/seclog-lib.sh"
+# shellcheck source=seclog-lib.sh
+. "$SECLOG_LIB"
 
-ok()   { echo "  [OK ]  $*"; PASS=$((PASS+1)); }
-warn() { echo "  [WARN]  $*"; WARN=$((WARN+1)); }
-fail() { echo "  [FAIL]  $*"; FAIL=$((FAIL+1)); }
+seclog_load_config
 
-echo "── seclog-linux diagnostics ──"
-echo
+SERVICE="seclog-monitor.service"
+pass=0 warn=0 fail=0
 
-echo "[ Prerequisites ]"
-for cmd in bash curl awk ss who getent timeout journalctl git; do
-    command -v "$cmd" >/dev/null 2>&1 && ok "$cmd found" || fail "$cmd not found"
-done
-command -v geoiplookup >/dev/null 2>&1 \
-    && ok "geoiplookup found (geo-location active)" \
-    || warn "geoiplookup not found — install: sudo apt install geoip-bin geoip-database"
-echo
+ok()      { printf '  [OK  ] %s\n' "$*"; (( ++pass )); }
+warning() { printf '  [WARN] %s\n' "$*"; (( ++warn )); }
+failure() { printf '  [FAIL] %s\n' "$*"; (( ++fail )); }
 
-echo "[ Config ]"
-if [ -f "$CONFIG" ]; then
-    ok "config found: $CONFIG"
-else
-    fail "config missing: $CONFIG — run install.sh first"
-fi
+section() { printf '\n[ %s ]\n' "$1"; }
 
-if [ -z "${NTFY_URL:-}" ] || [ "$NTFY_URL" = "http://YOUR_NTFY_HOST:2586/YOUR_TOPIC" ]; then
-    fail "NTFY_URL not configured in $CONFIG"
-else
-    ok "NTFY_URL set: $NTFY_URL"
-fi
-echo
+printf '── seclog-linux %s diagnostics ──\n' "$SECLOG_VERSION"
 
-echo "[ Network ]"
-if [ -n "${NTFY_URL:-}" ] && [ "$NTFY_URL" != "http://YOUR_NTFY_HOST:2586/YOUR_TOPIC" ]; then
-    _AUTH=${NTFY_TOKEN:+-H "Authorization: Bearer $NTFY_TOKEN"}
-    if curl -fsS -m 5 ${_AUTH:+"$_AUTH"} -d "seclog-diagnose test" "$NTFY_URL" >/dev/null 2>&1; then
-        ok "ntfy reachable and accepted test push"
+section "Prerequisites"
+for cmd in curl awk sort ss who getent timeout journalctl systemctl; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+        ok "$cmd found"
     else
-        fail "ntfy unreachable or auth failed — check NTFY_URL and NTFY_TOKEN"
+        failure "$cmd not found"
+    fi
+done
+if command -v geoiplookup >/dev/null 2>&1; then
+    ok "geoiplookup found (geo-location active)"
+else
+    warning "geoiplookup not found — install: sudo apt install geoip-bin geoip-database"
+fi
+
+section "Config"
+if [[ -f $SECLOG_CONFIG ]]; then
+    ok "config found: $SECLOG_CONFIG"
+    perms="$(stat -c '%a' "$SECLOG_CONFIG" 2>/dev/null || echo '?')"
+    if [[ $perms == 600 || $perms == 400 ]]; then
+        ok "config permissions are $perms"
+    else
+        warning "config is mode $perms — it may hold a token; run: chmod 600 $SECLOG_CONFIG"
     fi
 else
-    warn "skipping ntfy connectivity check (NTFY_URL not configured)"
+    failure "config missing: $SECLOG_CONFIG — run install.sh first"
 fi
-echo
 
-echo "[ Permissions ]"
-if id -nG 2>/dev/null | grep -qw systemd-journal; then
-    ok "user is in systemd-journal group"
+if seclog_ntfy_configured; then
+    ok "NTFY_URL set: $NTFY_URL"
+    if [[ -n $NTFY_TOKEN ]]; then
+        ok "NTFY_TOKEN set"
+    else
+        warning "NTFY_TOKEN empty (fine for public topics)"
+    fi
 else
-    warn "user not in systemd-journal — SSH log history may be empty"
-    warn "  fix: sudo usermod -aG systemd-journal \$USER  (then re-login)"
+    failure "NTFY_URL not configured in $SECLOG_CONFIG"
+fi
+
+section "Network"
+if seclog_ntfy_configured; then
+    if seclog_push "seclog-diagnose" "wrench" "low" "Test push from $(hostname) at $(date '+%F %T %Z')"; then
+        ok "ntfy reachable and accepted a test push"
+    else
+        failure "ntfy unreachable or auth rejected — check NTFY_URL and NTFY_TOKEN"
+    fi
+else
+    warning "skipping ntfy connectivity check (NTFY_URL not configured)"
+fi
+
+section "Permissions"
+if seclog_journal_restricted; then
+    warning "user is not in the systemd-journal group — SSH log history may be empty"
+    warning "  fix: sudo usermod -aG systemd-journal \$USER   (then re-login)"
+else
+    ok "sshd journal is readable"
 fi
 
 case ":$PATH:" in
     *":$HOME/.local/bin:"*) ok "\$HOME/.local/bin is in PATH" ;;
-    *) warn "\$HOME/.local/bin is NOT in PATH — add to .profile: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+    *) warning "\$HOME/.local/bin is NOT in PATH — add to .profile: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
 esac
-echo
 
-echo "[ Systemd service ]"
-if systemctl --user is-active seclog-linux-fail-monitor.service >/dev/null 2>&1; then
-    ok "seclog-linux-fail-monitor.service is active"
+section "Service"
+if systemctl --user is-active --quiet "$SERVICE"; then
+    ok "$SERVICE is active"
 else
-    fail "seclog-linux-fail-monitor.service is NOT running"
-    echo "       run: systemctl --user status seclog-linux-fail-monitor"
+    failure "$SERVICE is NOT running — check: systemctl --user status $SERVICE"
 fi
 
-if systemctl --user is-enabled seclog-linux-fail-monitor.service >/dev/null 2>&1; then
-    ok "seclog-linux-fail-monitor.service is enabled"
+if systemctl --user is-enabled --quiet "$SERVICE" 2>/dev/null; then
+    ok "$SERVICE is enabled"
 else
-    warn "seclog-linux-fail-monitor.service is not enabled (won't auto-start)"
+    warning "$SERVICE is not enabled (it will not auto-start)"
 fi
-echo
 
-echo "── Result: $PASS ok, $WARN warnings, $FAIL failures ──"
-[ "$FAIL" -gt 0 ] && exit 1 || exit 0
+if loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
+    ok "lingering is enabled (monitor survives logout)"
+else
+    warning "lingering is off — the monitor stops on logout; run: sudo loginctl enable-linger $USER"
+fi
+
+printf '\n── Result: %d ok, %d warnings, %d failures ──\n' "$pass" "$warn" "$fail"
+(( fail == 0 ))

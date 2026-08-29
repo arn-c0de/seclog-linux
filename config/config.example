@@ -1,37 +1,46 @@
-# Config for seclog-linux
-# Copy this to $HOME/.config/seclog-linux/config and edit.
+# seclog-linux configuration.
+# Installed to ~/.config/seclog-linux/config — the installer never overwrites it.
+# This file may hold an auth token, so keep it at mode 0600.
 
-# Full ntfy topic URL (server + topic). Can be http or https, public or self-hosted.
-# Examples:
+# ── ntfy ─────────────────────────────────────────────────────────────────
+# Full topic URL (server + topic), http or https, public or self-hosted.
 #   https://ntfy.sh/your-unique-topic
 #   http://192.168.1.10:2586/ssh-login
+# Self-hosting is strongly recommended: every push carries login metadata.
 NTFY_URL="http://YOUR_NTFY_HOST:2586/YOUR_TOPIC"
 
-# Ntfy auth token (optional). Required if your ntfy instance uses auth.
-# Leave empty for anonymous/public topics.
+# Auth token, required only if your ntfy instance enforces authentication.
 NTFY_TOKEN=""
 
-# How far back to look for failed attempts in the login banner
-FAIL_LOOKBACK="24 hours ago"
+# Seconds to wait for ntfy before giving up on a push.
+NTFY_TIMEOUT=5
 
-# Rate-limit window for failed-login pushes, in seconds (default 300 = 5 min).
-# During brute-force, at most one push per source-IP per window.
-FAIL_RATELIMIT_WINDOW=300
-
-# Max seconds to spend reading journal data during interactive SSH login.
-# Lower values reduce login delay if journald is slow.
-LOGIN_JOURNAL_TIMEOUT=2
-
-# Push payload detail level:
-#   full    = include UID, groups, client reverse-DNS, SSH key fingerprint, TTY
-#   minimal = omit extra identity/system metadata and keep only essential context
+# How much detail each push carries:
+#   full    = uid, groups, client reverse-DNS, SSH key fingerprint, TTY
+#   minimal = user, source address, auth method and the summary counters only
 PUSH_METADATA_LEVEL="full"
 
-# Allow seclog-update to use a custom SECLOG_REPO_DIR. Default is off, so
-# updates only run from $HOME/Projects/seclog-linux unless you opt in.
+# ── Reporting ────────────────────────────────────────────────────────────
+# How far back the report scans for failed attempts. Any journalctl --since
+# expression works, e.g. "1 hour ago", "yesterday", "2024-01-01".
+FAIL_LOOKBACK="24 hours ago"
+
+# Seconds to wait for journald while building the login banner. Lower this if a
+# slow journal delays your SSH logins; 0 disables the timeout entirely.
+JOURNAL_TIMEOUT=2
+
+# ── Failed-login monitor ─────────────────────────────────────────────────
+# At most one push per source IP per window, so a brute-force run cannot flood
+# your phone. Attempts suppressed in between are counted in the next push.
+FAIL_RATELIMIT_WINDOW=300
+
+# Days of silence after which an IP's rate-limit state file is discarded.
+STATE_TTL_DAYS=7
+
+# ── seclog-update ────────────────────────────────────────────────────────
+# Updates only run from $HOME/Projects/seclog-linux unless you opt in here.
 ALLOW_CUSTOM_REPO_DIR=0
 
-# Expected git remote(s) for seclog-update. Updates abort if origin does not
-# match one of these values.
+# Accepted `origin` remotes. An update aborts if origin matches neither.
 EXPECTED_UPDATE_ORIGIN="https://github.com/arn-c0de/seclog-linux.git"
 EXPECTED_UPDATE_ORIGIN_ALT="git@github.com:arn-c0de/seclog-linux.git"

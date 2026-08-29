@@ -97,7 +97,7 @@ seclog "7 days ago"       # last week
 | Symptom | Likely cause |
 |---|---|
 | Banner appears, no push arrives | `NTFY_URL` wrong or `NTFY_TOKEN` invalid. Test: `curl -u user:pass -d hi http://HOST:2586/topic` |
-| No failed-attempt pushes | Daemon not running: `systemctl --user status seclog-linux-fail-monitor`. Check logs: `journalctl --user -u seclog-linux-fail-monitor -n 50` |
+| No failed-attempt pushes | Daemon not running: `systemctl --user status seclog-monitor`. Check logs: `journalctl --user -u seclog-monitor -n 50` |
 | Daemon stops after I log out | `sudo loginctl enable-linger $USER` not done |
 | Banner doesn't appear on SSH | `.bashrc` only runs for **interactive** sessions. Test: `ssh -t host`. For non-interactive logins, catch them via the daemon (which watches the journal). |
 | `last` command missing on new Debian | Expected — Debian 13 moved it to the `wtmpdb` package. Scripts use `journalctl` instead of `last`, so this doesn't matter. |

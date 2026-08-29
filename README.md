@@ -72,12 +72,14 @@ source-IP per 5 minutes so a brute-force flood won't spam your phone).
 
 | File | What it does |
 |------|--------------|
-| `bin/ssh-login-notify.sh` | Sourced from `.bashrc` on SSH login. Prints the banner and sends the login push. |
-| `bin/ssh-failed-monitor.sh` | Long-running daemon. Tails `journalctl` for failed SSH events and pushes them. |
+| `bin/seclog-login` | Started from `.bashrc` on SSH login. Prints the banner and sends the login push. |
+| `bin/seclog-monitor` | Long-running daemon. Tails `journalctl` for failed SSH events and pushes them. |
 | `bin/seclog` | CLI command — prints the same banner on demand, without sending a push. |
 | `bin/seclog-update` | Pulls the newest commit for your checked-out branch and re-runs the installer. |
 | `bin/seclog-restart` | Reloads systemd user units and restarts the failed-login monitor service. |
-| `systemd/seclog-linux-fail-monitor.service` | User-level systemd unit that supervises the daemon. |
+| `bin/seclog-diagnose` | Health check for dependencies, config, permissions and the monitor service. |
+| `bin/seclog-lib.sh` | Shared library: config loading, journal access, geo-lookup, report rendering, ntfy push. |
+| `systemd/seclog-monitor.service` | User-level systemd unit that supervises the daemon. |
 | `ntfy/server.yml.example` | Recommended hardened config for self-hosted ntfy. |
 
 ## Management commands
@@ -141,8 +143,8 @@ seclog-restart
 The project intentionally combines two different event sources into one push
 channel:
 
-- Interactive SSH login: handled at shell startup via `bin/ssh-login-notify.sh`
-- Failed SSH authentication: handled in the background via `bin/ssh-failed-monitor.sh`
+- Interactive SSH login: handled at shell startup via `bin/seclog-login`
+- Failed SSH authentication: handled in the background via `bin/seclog-monitor`
 
 That gives you one consistent notification stream in ntfy:
 
@@ -211,8 +213,8 @@ The installer will:
 
 1. Copy scripts to `~/.local/bin/`
 2. Write a default config to `~/.config/seclog-linux/config` (on first run)
-3. Hook your `.bashrc` to source `ssh-login-notify.sh` on SSH logins
-4. Drop a systemd user unit at `~/.config/systemd/user/seclog-linux-fail-monitor.service`
+3. Hook your `.bashrc` to run `seclog-login` on SSH logins
+4. Drop a systemd user unit at `~/.config/systemd/user/seclog-monitor.service`
    and enable it
 
 Then edit `~/.config/seclog-linux/config`:
@@ -260,8 +262,14 @@ FAIL_LOOKBACK="24 hours ago"
 # Failed-login push rate-limit per source IP in seconds
 FAIL_RATELIMIT_WINDOW=300
 
-# Max seconds to spend reading journal data during interactive SSH login
-LOGIN_JOURNAL_TIMEOUT=2
+# Max seconds to spend reading journal data during interactive SSH login (0 = no limit)
+JOURNAL_TIMEOUT=2
+
+# Seconds to wait for ntfy before giving up on a push
+NTFY_TIMEOUT=5
+
+# Days of silence after which an IP's rate-limit state file is discarded
+STATE_TTL_DAYS=7
 
 # Push payload detail level: full or minimal
 PUSH_METADATA_LEVEL="full"
@@ -280,7 +288,9 @@ What the settings do:
 - `NTFY_TOKEN`: Optional token for authenticated ntfy servers.
 - `FAIL_LOOKBACK`: Human-readable window shown in the banner, for example `1 hour ago` or `7 days ago`.
 - `FAIL_RATELIMIT_WINDOW`: Prevents push spam during brute-force attempts.
-- `LOGIN_JOURNAL_TIMEOUT`: Caps how long interactive login waits on `journalctl` before continuing.
+- `JOURNAL_TIMEOUT`: Caps how long the login banner waits on `journalctl` before continuing. `0` disables the timeout. The old name `LOGIN_JOURNAL_TIMEOUT` is still accepted.
+- `NTFY_TIMEOUT`: Caps how long a push may take before it is abandoned.
+- `STATE_TTL_DAYS`: How long per-IP rate-limit state is kept in `~/.cache/seclog-linux`.
 - `PUSH_METADATA_LEVEL`: Set to `minimal` to omit UID, groups, reverse-DNS host, TTY and SSH key fingerprint from login pushes.
 - `ALLOW_CUSTOM_REPO_DIR`: Keeps `seclog-update` pinned to `~/Projects/seclog-linux` unless you explicitly allow another checkout path.
 - `EXPECTED_UPDATE_ORIGIN` / `EXPECTED_UPDATE_ORIGIN_ALT`: `seclog-update` aborts if `origin` does not match one of these remotes.
@@ -415,7 +425,7 @@ seclog "1 hour ago"
 Check that the user service is active:
 
 ```bash
-systemctl --user status seclog-linux-fail-monitor
+systemctl --user status seclog-monitor
 ```
 
 Reload and restart the service after config edits:
@@ -427,7 +437,7 @@ seclog-restart
 Check recent daemon logs:
 
 ```bash
-journalctl --user -u seclog-linux-fail-monitor -n 50
+journalctl --user -u seclog-monitor -n 50
 ```
 
 Check that the ntfy endpoint itself accepts a message:
@@ -455,7 +465,7 @@ Then verify the two real event paths:
 | `seclog` shows data, but no push arrives | `NTFY_URL` wrong, `NTFY_TOKEN` wrong, or ntfy is unreachable. Test with `curl` directly. |
 | `curl` or seclog gets `403 forbidden` from ntfy | Your ntfy server requires auth and `NTFY_TOKEN` is missing or invalid. Put a valid `tk_...` token into `~/.config/seclog-linux/config`, then run `seclog-restart`. |
 | Login banner does not appear on SSH | `.bashrc` only runs for interactive shell sessions. Test with `ssh -t host`. |
-| Failed-login pushes do not arrive | Check `systemctl --user status seclog-linux-fail-monitor` and `journalctl --user -u seclog-linux-fail-monitor -n 50`. |
+| Failed-login pushes do not arrive | Check `systemctl --user status seclog-monitor` and `journalctl --user -u seclog-monitor -n 50`. |
 | Login history or failed-attempt summaries stay empty | Your user may not be allowed to read system SSH logs. On affected distros, add the user to `systemd-journal`, then log out and back in: `sudo usermod -aG systemd-journal "$USER"` |
 | Failed-login monitor stops after logout | Run `sudo loginctl enable-linger "$USER"` once. |
 | Public `ntfy.sh` works, but you are leaking too much metadata | Use a self-hosted ntfy server. The payload includes username, client IP, group membership and SSH key fingerprint. |
@@ -465,13 +475,13 @@ Then verify the two real event paths:
 
 The project separates interactive login handling from background monitoring:
 
-- `bin/ssh-login-notify.sh`: Runs from `.bashrc` on interactive SSH logins.
-- `bin/ssh-failed-monitor.sh`: Watches the journal continuously and pushes failed-login events.
+- `bin/seclog-login`: Runs from `.bashrc` on interactive SSH logins.
+- `bin/seclog-monitor`: Watches the journal continuously and pushes failed-login events.
 - `bin/seclog`: Prints the security summary without sending a push.
 - `bin/seclog-update`: Updates a git checkout on its current branch, asks for confirmation when needed, re-runs `install.sh`, then sends an ntfy update push with host/IP, commit change and commit text.
   It also validates the repo path and expected `origin`, and can optionally verify commit signatures.
 - `bin/seclog-restart`: Reloads and restarts the failed-login monitor user service after config or unit changes.
-- `systemd/seclog-linux-fail-monitor.service`: Keeps the failed-login monitor alive as a user service.
+- `systemd/seclog-monitor.service`: Keeps the failed-login monitor alive as a user service.
 
 This means:
 

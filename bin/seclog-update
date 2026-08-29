@@ -1,141 +1,121 @@
-#!/bin/bash
-# Update an installed seclog-linux checkout to the newest commit on its current
-# branch, then re-run the installer so deployed scripts stay in sync.
+#!/usr/bin/env bash
+# seclog-update — fast-forward the installed checkout to the newest signed
+# commit on its current branch, re-run the installer and restart the monitor.
+#
+# Safety rails, all of which must pass before anything is pulled:
+#   1. the checkout lives at the expected path (override needs an explicit opt-in)
+#   2. `origin` points at the expected repository
+#   3. the target commit carries a good GPG signature
+#   4. the user confirms the change interactively (skip with --yes)
 
 set -euo pipefail
 
+SECLOG_LIB="$(dirname "$(readlink -f "$0")")/seclog-lib.sh"
+[[ -f $SECLOG_LIB ]] || SECLOG_LIB="$HOME/.local/bin/seclog-lib.sh"
+# shellcheck source=seclog-lib.sh
+. "$SECLOG_LIB"
+
+seclog_load_config
+
 DEFAULT_REPO_DIR="$HOME/Projects/seclog-linux"
-REPO_DIR="${SECLOG_REPO_DIR:-$HOME/Projects/seclog-linux}"
-SERVICE="seclog-linux-fail-monitor.service"
-CONFIG="${SSH_NOTIFY_CONFIG:-$HOME/.config/seclog-linux/config}"
+REPO_DIR="${SECLOG_REPO_DIR:-$DEFAULT_REPO_DIR}"
+SERVICE="seclog-monitor.service"
 ALLOW_CUSTOM_REPO_DIR="${ALLOW_CUSTOM_REPO_DIR:-0}"
-EXPECTED_UPDATE_ORIGIN="${EXPECTED_UPDATE_ORIGIN:-https://github.com/arn-c0de/seclog-linux.git}"
-EXPECTED_UPDATE_ORIGIN_ALT="${EXPECTED_UPDATE_ORIGIN_ALT:-git@github.com:arn-c0de/seclog-linux.git}"
+EXPECTED_ORIGINS=(
+    "${EXPECTED_UPDATE_ORIGIN:-https://github.com/arn-c0de/seclog-linux.git}"
+    "${EXPECTED_UPDATE_ORIGIN_ALT:-git@github.com:arn-c0de/seclog-linux.git}"
+)
 
-if [ -f "$CONFIG" ]; then
-    # shellcheck disable=SC1090
-    . "$CONFIG"
+ASSUME_YES=0
+[[ ${1:-} == --yes || ${1:-} == -y ]] && ASSUME_YES=1
+
+die() { printf 'seclog-update: %s\n' "$*" >&2; exit 1; }
+
+# ── 1. Locate and validate the checkout ──────────────────────────────────
+[[ -d $REPO_DIR/.git ]] || die "no git checkout at $REPO_DIR — set SECLOG_REPO_DIR and retry"
+
+repo="$(cd -- "$REPO_DIR" && pwd -P)"
+expected_repo="$DEFAULT_REPO_DIR"
+[[ -d $DEFAULT_REPO_DIR ]] && expected_repo="$(cd -- "$DEFAULT_REPO_DIR" && pwd -P)"
+
+if [[ -n ${SECLOG_REPO_DIR:-} && $repo != "$expected_repo" && $ALLOW_CUSTOM_REPO_DIR != 1 ]]; then
+    die "refusing a custom SECLOG_REPO_DIR without ALLOW_CUSTOM_REPO_DIR=1"$'\n'"  expected: $expected_repo"$'\n'"  got:      $repo"
 fi
 
-if [ ! -d "$REPO_DIR/.git" ]; then
-    echo "No git checkout found at: $REPO_DIR" >&2
-    echo "Set SECLOG_REPO_DIR to your seclog-linux checkout and retry." >&2
-    exit 1
-fi
+cd -- "$repo"
 
-REPO_REAL="$(cd -- "$REPO_DIR" && pwd -P)"
-DEFAULT_REPO_REAL="$DEFAULT_REPO_DIR"
-[ -d "$DEFAULT_REPO_DIR" ] && DEFAULT_REPO_REAL="$(cd -- "$DEFAULT_REPO_DIR" && pwd -P)"
+origin="$(git remote get-url origin)"
+matched=0
+for candidate in "${EXPECTED_ORIGINS[@]}"; do
+    [[ $origin == "$candidate" ]] && matched=1
+done
+(( matched )) || die "refusing to update from an unexpected origin: $origin"$'\n'"  expected one of: ${EXPECTED_ORIGINS[*]}"
 
-if [ "${SECLOG_REPO_DIR+x}" = "x" ] && [ "$REPO_REAL" != "$DEFAULT_REPO_REAL" ] && [ "$ALLOW_CUSTOM_REPO_DIR" != "1" ]; then
-    echo "Refusing custom SECLOG_REPO_DIR without ALLOW_CUSTOM_REPO_DIR=1" >&2
-    echo "Expected: $DEFAULT_REPO_REAL" >&2
-    echo "Got:      $REPO_REAL" >&2
-    exit 1
-fi
+branch="$(git branch --show-current)"
+[[ -n $branch ]] || die "no branch checked out in $repo (detached HEAD)"
 
-cd -- "$REPO_REAL"
+installer="$repo/install.sh"
+[[ -f $installer ]] || die "installer not found at $installer"
 
-ORIGIN_URL="$(git remote get-url origin)"
-if [ "$ORIGIN_URL" != "$EXPECTED_UPDATE_ORIGIN" ] && [ "$ORIGIN_URL" != "$EXPECTED_UPDATE_ORIGIN_ALT" ]; then
-    echo "Refusing update from unexpected origin remote." >&2
-    echo "Expected: $EXPECTED_UPDATE_ORIGIN or $EXPECTED_UPDATE_ORIGIN_ALT" >&2
-    echo "Got:      $ORIGIN_URL" >&2
-    exit 1
-fi
-
-BRANCH="$(git branch --show-current)"
-if [ -z "$BRANCH" ]; then
-    echo "No current branch checked out in $REPO_REAL" >&2
-    exit 1
-fi
-
-INSTALL_SCRIPT="$REPO_REAL/install.sh"
-if [ ! -f "$INSTALL_SCRIPT" ]; then
-    echo "Installer not found at: $INSTALL_SCRIPT" >&2
-    exit 1
-fi
-
+# ── 2. Compare local and remote ──────────────────────────────────────────
 echo "== seclog-update =="
-echo "Repo:    $REPO_REAL"
-echo "Branch:  $BRANCH"
-echo "Remote:  $ORIGIN_URL"
+printf 'Repo:    %s\nBranch:  %s\nRemote:  %s\n' "$repo" "$branch" "$origin"
 
 git fetch origin --prune
 
-LOCAL_COMMIT="$(git rev-parse HEAD)"
-REMOTE_REF="origin/$BRANCH"
-REMOTE_COMMIT="$(git rev-parse "$REMOTE_REF")"
-LOCAL_SHORT="$(git rev-parse --short "$LOCAL_COMMIT")"
-REMOTE_SHORT="$(git rev-parse --short "$REMOTE_COMMIT")"
-LOCAL_SUBJECT="$(git log -1 --pretty=%s "$LOCAL_COMMIT")"
-REMOTE_SUBJECT="$(git log -1 --pretty=%s "$REMOTE_COMMIT")"
+local_commit="$(git rev-parse HEAD)"
+remote_commit="$(git rev-parse "origin/$branch")"
+local_short="$(git rev-parse --short "$local_commit")"
+remote_short="$(git rev-parse --short "$remote_commit")"
 
-echo "Current: $LOCAL_SHORT"
-echo "Target:  $REMOTE_SHORT"
-echo "Message: $REMOTE_SUBJECT"
+printf 'Current: %s (%s)\n' "$local_short" "$(git log -1 --pretty=%s "$local_commit")"
 
-if [ "$LOCAL_COMMIT" = "$REMOTE_COMMIT" ]; then
+if [[ $local_commit == "$remote_commit" ]]; then
     echo "Update:  already up to date"
-    echo "Commit:  $LOCAL_SHORT ($LOCAL_SUBJECT)"
     exit 0
 fi
 
-echo "Verify:  commit signature required"
-VERIFY_OUTPUT="$(git verify-commit "$REMOTE_COMMIT" 2>&1)"
-VERIFY_STATUS=$?
-VERIFY_SIGNER="$(printf '%s\n' "$VERIFY_OUTPUT" | awk '/^Good "git" signature for / {sub(/^Good "git" signature for /, ""); print; exit}')"
-if [ $VERIFY_STATUS -ne 0 ] || [ -z "$VERIFY_SIGNER" ]; then
-    echo "VERIFIED: NO — aborting" >&2
-    printf '%s\n' "$VERIFY_OUTPUT" >&2
+printf 'Target:  %s (%s)\n' "$remote_short" "$(git log -1 --pretty=%s "$remote_commit")"
+
+# ── 3. Require a good signature on the target commit ─────────────────────
+verify_output=""
+verify_status=0
+verify_output="$(git verify-commit "$remote_commit" 2>&1)" || verify_status=$?
+signer="$(awk '/^Good "git" signature for / { sub(/^Good "git" signature for /, ""); print; exit }' \
+    <<<"$verify_output")"
+
+if (( verify_status != 0 )) || [[ -z $signer ]]; then
+    printf 'VERIFIED: no — aborting\n%s\n' "$verify_output" >&2
     exit 1
 fi
-echo "VERIFIED: yes"
-echo "Signer:   $VERIFY_SIGNER"
+printf 'VERIFIED: yes (%s)\n' "$signer"
 
-echo "Update:  available"
-printf "Proceed with update? [y/N] "
-read -r confirm
-case "$confirm" in
-    y|Y) ;;
-    *)
-        echo "Aborted."
-        exit 0
-        ;;
-esac
-echo "Updating: $LOCAL_SHORT -> $REMOTE_SHORT"
-git pull --ff-only origin "$BRANCH"
+# ── 4. Confirm, then apply ───────────────────────────────────────────────
+if (( ! ASSUME_YES )); then
+    read -r -p "Proceed with update? [y/N] " confirm
+    [[ $confirm == [yY] ]] || { echo "Aborted."; exit 0; }
+fi
 
-/bin/bash "$INSTALL_SCRIPT"
+printf 'Updating: %s -> %s\n' "$local_short" "$remote_short"
+git merge --ff-only "$remote_commit"
+
+bash "$installer"
 
 systemctl --user daemon-reload
 systemctl --user restart "$SERVICE"
 
-UPDATE_HOST="$(hostname)"
-UPDATE_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-[ -z "$UPDATE_IP" ] && UPDATE_IP="$(ip route get 1 2>/dev/null | awk '/src/ {for (i=1; i<=NF; i++) if ($i=="src") {print $(i+1); exit}}')"
-[ -z "$UPDATE_IP" ] && UPDATE_IP="unknown"
-UPDATE_TIME="$(date '+%Y-%m-%d %H:%M:%S %Z')"
-UPDATE_COMMIT_TEXT="$(git log -1 --pretty=%s HEAD)"
+# ── 5. Announce ──────────────────────────────────────────────────────────
+new_short="$(git rev-parse --short HEAD)"
+subject="$(git log -1 --pretty=%s HEAD)"
+host="$(hostname)"
+ip="$(hostname -I 2>/dev/null | awk '{ print $1 }')"
+[[ -z $ip ]] && ip="$(ip route get 1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
 
-if [ -n "${NTFY_URL:-}" ]; then
-    BODY=$(printf 'Host:    %s\nIP:      %s\nBranch:  %s\nFrom:    %s\nTo:      %s\nCommit:  %s\nTime:    %s' \
-        "$UPDATE_HOST" \
-        "$UPDATE_IP" \
-        "$BRANCH" \
-        "$LOCAL_SHORT" \
-        "$(git rev-parse --short HEAD)" \
-        "$UPDATE_COMMIT_TEXT" \
-        "$UPDATE_TIME")
+body="$(printf 'Host:    %s\nIP:      %s\nBranch:  %s\nFrom:    %s\nTo:      %s\nCommit:  %s\nSigner:  %s\nTime:    %s' \
+    "$host" "${ip:-unknown}" "$branch" "$local_short" "$new_short" "$subject" "$signer" \
+    "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
 
-    curl -fsS -m 3 \
-        -H "Title: seclog updated on $UPDATE_HOST: $UPDATE_COMMIT_TEXT" \
-        -H "Tags: arrows_counterclockwise,white_check_mark" \
-        -H "Priority: default" \
-        ${NTFY_TOKEN:+-H "Authorization: Bearer $NTFY_TOKEN"} \
-        -d "$BODY" \
-        "$NTFY_URL" >/dev/null 2>&1 || true
-fi
+seclog_push "seclog updated on $host: $subject" "arrows_counterclockwise,white_check_mark" "default" "$body" || true
 
-echo "Service: $(systemctl --user is-active "$SERVICE")"
-echo "Commit:  $(git rev-parse --short HEAD) ($UPDATE_COMMIT_TEXT)"
+printf 'Service: %s\n' "$(systemctl --user is-active "$SERVICE" || true)"
+printf 'Commit:  %s (%s)\n' "$new_short" "$subject"
