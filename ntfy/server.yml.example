@@ -1,15 +1,31 @@
-# ntfy self-hosted config (example) — mount into container at /etc/ntfy/server.yml
+# ntfy self-hosted config (example) — mount into the container at /etc/ntfy/server.yml
 # Docs: https://docs.ntfy.sh/config/
+#
+# seclog refuses to push over plaintext HTTP to anything outside the local
+# network, because the payload profiles the host and the auth token rides
+# along. Terminate TLS either here or on a reverse proxy in front of ntfy.
 
-base-url: http://YOUR_NTFY_HOST:2586
+# Public address clients use. Must be https:// unless ntfy is reachable only
+# over the LAN or a VPN.
+base-url: https://ntfy.example.com
+
+# A) Behind a reverse proxy that terminates TLS (nginx, Caddy, Traefik):
 listen-http: ":80"
+behind-proxy: true
+
+# B) Or let ntfy terminate TLS itself — then use these instead of A:
+# listen-https: ":443"
+# key-file: /etc/ntfy/tls/privkey.pem
+# cert-file: /etc/ntfy/tls/fullchain.pem
+# behind-proxy: false
 
 cache-file: /var/cache/ntfy/cache.db
 auth-file: /var/cache/ntfy/user.db
-auth-default-access: deny-all
-behind-proxy: false
 
-# Home-server friendly rate-limits — raise if many clients
+# Nobody reads or writes a topic without an explicit grant. Keep this.
+auth-default-access: deny-all
+
+# Home-server friendly rate limits — raise if you have many clients.
 visitor-request-limit-burst: 1000
 visitor-request-limit-replenish: 1s
 visitor-message-daily-limit: 100000

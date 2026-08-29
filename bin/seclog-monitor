@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
-# seclog-monitor — follow the journal for failed SSH logins and push them to ntfy.
+# seclog-monitor — follow the journal for SSH authentication events and push
+# them to ntfy.
 #
-# Rate limit: at most one push per source IP per FAIL_RATELIMIT_WINDOW seconds,
-# so a brute-force run produces a handful of notifications instead of thousands.
-# Suppressed attempts are counted and reported in the next push for that IP.
+# This is the only component that sees *every* login. The .bashrc banner runs
+# for interactive bash sessions and nothing else, so `ssh host cmd`, scp, sftp,
+# rsync, git-over-ssh and any other login shell would otherwise arrive without
+# a notification. Successful logins are therefore reported from here by
+# default (LOGIN_PUSH_SOURCE).
+#
+# Rate limit: at most one failure push per source IP per FAIL_RATELIMIT_WINDOW
+# seconds, so a brute-force run produces a handful of notifications instead of
+# thousands. Suppressed attempts are counted and reported in the next push.
 
 set -uo pipefail
 
@@ -14,92 +21,127 @@ SECLOG_LIB="$(dirname "$(readlink -f "$0")")/seclog-lib.sh"
 
 seclog_load_config
 
+# EX_CONFIG. The unit maps this to "do not restart": without it systemd would
+# spin on a fresh install, where the config still holds the placeholder URL.
+readonly EX_CONFIG=78
+
 if ! seclog_ntfy_configured; then
-    printf 'seclog-monitor: NTFY_URL is not configured in %s\n' "$SECLOG_CONFIG" >&2
-    exit 1
+    seclog_log err "not starting: NTFY_URL is not configured in $SECLOG_CONFIG"
+    exit "$EX_CONFIG"
+fi
+if ! seclog_transport_ok; then
+    seclog_log err "not starting: $NTFY_URL is plaintext HTTP to a non-local address; use https:// or set NTFY_ALLOW_PLAINTEXT=1"
+    exit "$EX_CONFIG"
 fi
 
 STATE_DIR="${STATE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/seclog-linux}"
-STATE_TTL_DAYS="${STATE_TTL_DAYS:-7}"
-mkdir -p "$STATE_DIR"
+if ! mkdir -p "$STATE_DIR"; then
+    seclog_log err "cannot create state directory $STATE_DIR — rate limiting would be disabled"
+    exit "$EX_CONFIG"
+fi
 
 # Drop state for IPs we have not heard from in a while, so the directory does
 # not grow without bound on an internet-facing host.
 find "$STATE_DIR" -maxdepth 1 -type f -mtime "+$STATE_TTL_DAYS" -delete 2>/dev/null || true
 
 if seclog_journal_restricted; then
-    printf 'seclog-monitor: %s cannot read sshd journal entries; add it to the systemd-journal group and re-login\n' \
-        "$USER" >&2
+    seclog_log warning "$USER cannot read sshd journal entries; add it to the systemd-journal group and re-login"
 fi
 
-# Turn one journal line into "<user>\t<ip>\t<port>\t<reason>", or nothing when
-# the line carries no source address.
-parse_event() {
-    awk '
-        # First token after a bare word, e.g. after("from") in "... from 1.2.3.4 ...".
-        function after(name,   i) {
-            for (i = 1; i < NF; i++) if ($i == name) return $(i + 1)
-            return ""
-        }
-        # Value of a "key=value" token, as used by the pam_unix log format.
-        function kv(key,   m) {
-            if (!match($0, "(^|[ \t])" key "=[^ \t]+")) return ""
-            m = substr($0, RSTART, RLENGTH)
-            sub(/^[ \t]/, "", m)
-            sub(/^[^=]*=/, "", m)
-            return m
-        }
+seclog_log notice "monitor started (login pushes: $LOGIN_PUSH_SOURCE, window: ${FAIL_RATELIMIT_WINDOW}s)"
 
+# Turn one journal line into "<kind>\t<user>\t<ip>\t<port>\t<reason>", or
+# nothing when the line carries no usable source address.
+parse_event() {
+    awk "$SECLOG_AWK_LIB"'
         BEGIN { OFS = "\t" }
         {
-            user = after("for")
-            if (user == "" || user == "invalid") user = after("user")
-            if (user == "") user = kv("user")
-            if (user == "") user = "?"
+            ip = peer_ip()
+            if (ip == "") next
 
-            ip = after("from")
-            # "Disconnected from authenticating user <user> <ip> port <port>"
-            # puts the address after the user name instead of after "from".
-            if (ip == "authenticating") ip = after(user)
-            if (ip == "") ip = kv("rhost")
-            if (ip !~ /^[0-9]+\.[0-9.]+$|:/) next
-
-            port = after("port")
-            if (port !~ /^[0-9]+$/) port = "?"
+            if (index($0, "Accepted ")) {
+                print "ok", login_user(), ip, peer_port(), auth_method()
+                next
+            }
 
             reason = "authentication failure"
-            if (index($0, "Failed password"))    reason = "failed password"
-            else if (index($0, "Invalid user"))  reason = "invalid user"
-            else if (index($0, "Disconnected"))  reason = "disconnected while authenticating"
+            if      (index($0, "Failed password")) reason = "failed password"
+            else if (index($0, "Invalid user"))    reason = "invalid user"
+            else if (index($0, "Disconnected"))    reason = "disconnected while authenticating"
 
-            print user, ip, port, reason
+            print "fail", login_user(), ip, peer_port(), reason
         }'
+}
+
+# Read "<epoch> <count>" from a state file, rejecting anything that is not a
+# plain number. The values feed an arithmetic context, where bash would happily
+# evaluate `a[$(command)]`.
+read_state() {
+    local file="$1"
+    state_stamp=0; state_count=0
+    [[ -f $file ]] || return 0
+    local stamp count
+    read -r stamp count <"$file" || return 0
+    [[ ${stamp:-} =~ ^[0-9]+$ ]] && state_stamp="$stamp"
+    [[ ${count:-} =~ ^[0-9]+$ ]] && state_count="$count"
+    return 0
 }
 
 journalctl -f -n 0 --no-pager "${SECLOG_SSHD_MATCH[@]}" 2>/dev/null |
 while IFS= read -r line; do
     case "$line" in
+        *"Accepted "*) ;;
         *"Failed password for "*|*"Invalid user "*|*"authentication failure"*|*"Disconnected from authenticating user"*) ;;
         *) continue ;;
     esac
 
-    IFS=$'\t' read -r user ip port reason < <(parse_event <<<"$line")
+    IFS=$'\t' read -r kind user ip port reason < <(parse_event <<<"$line")
     [[ -n ${ip:-} ]] || continue
 
-    # State file per IP: "<epoch of last push> <attempts suppressed since>".
-    state="$STATE_DIR/${ip//[^0-9A-Za-z.:_-]/_}"
-    last_push=0; suppressed=0
-    [[ -f $state ]] && read -r last_push suppressed <"$state"
     now="$(date +%s)"
+    # The IP is already validated by the parser; the substitution is belt and
+    # braces so a state file can never escape the directory.
+    safe_ip="${ip//[^0-9A-Za-z.:_-]/_}"
 
-    if (( now - last_push < FAIL_RATELIMIT_WINDOW )); then
-        printf '%s %s\n' "$last_push" "$(( suppressed + 1 ))" >"$state"
+    if [[ $kind == ok ]]; then
+        [[ $LOGIN_PUSH_SOURCE == monitor || $LOGIN_PUSH_SOURCE == both ]] || continue
+
+        # Collapse bursts from the same account and address — one rsync run or
+        # a scp loop opens many short sessions.
+        state="$STATE_DIR/login-${safe_ip}-${user}"
+        read_state "$state"
+        (( now - state_stamp < LOGIN_DEDUP_WINDOW )) && continue
+        printf '%s 0\n' "$now" >"$state"
+
+        body="$(printf 'User:   %s\nFrom:   %s\nAuth:   %s\nOrigin: %s\nHost:   %s\nTime:   %s' \
+            "$user" \
+            "$(seclog_format_endpoint "$ip" "$port")" \
+            "$reason" \
+            "$(seclog_geo_or_unknown "$ip")" \
+            "$(hostname)" \
+            "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
+
+        seclog_push "SSH login: $user from $ip" "warning,key" "high" "$body" || true
+        continue
+    fi
+
+    # State file per IP: "<epoch of last push> <attempts suppressed since>".
+    state="$STATE_DIR/fail-$safe_ip"
+    read_state "$state"
+
+    if (( now - state_stamp < FAIL_RATELIMIT_WINDOW )); then
+        printf '%s %s\n' "$state_stamp" "$(( state_count + 1 ))" >"$state"
         continue
     fi
     printf '%s 0\n' "$now" >"$state"
 
-    body="$(printf 'Reason: %s\nIP:     %s:%s\nUser:   %s\nSuppressed since last push: %s\nTime:   %s' \
-        "$reason" "$ip" "$port" "$user" "$suppressed" "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
+    body="$(printf 'Reason: %s\nIP:     %s\nOrigin: %s\nUser:   %s\nSuppressed since last push: %s\nTime:   %s' \
+        "$reason" \
+        "$(seclog_format_endpoint "$ip" "$port")" \
+        "$(seclog_geo_or_unknown "$ip")" \
+        "$user" \
+        "$state_count" \
+        "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
 
     seclog_push "SSH FAILED: $user from $ip" "skull,warning" "high" "$body" || true
 done

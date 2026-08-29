@@ -143,8 +143,15 @@ seclog-restart
 The project intentionally combines two different event sources into one push
 channel:
 
-- Interactive SSH login: handled at shell startup via `bin/seclog-login`
+- Successful SSH login: handled in the background via `bin/seclog-monitor`
 - Failed SSH authentication: handled in the background via `bin/seclog-monitor`
+- The login banner you see in the terminal: `bin/seclog-login`, from `.bashrc`
+
+Both notifications come from the monitor on purpose. The `.bashrc` hook only
+ever runs for interactive bash, so `scp`, `sftp`, `rsync`, `ssh host cmd` and
+any other login shell would log in without a word. The monitor reads the
+journal and therefore sees every one of them. Set `LOGIN_PUSH_SOURCE="banner"`
+if you cannot run the user service and accept that gap.
 
 That gives you one consistent notification stream in ntfy:
 
@@ -186,7 +193,7 @@ Then edit:
 Minimum config:
 
 ```bash
-NTFY_URL="https://ntfy.sh/your-unique-topic"
+NTFY_URL="https://ntfy.example.com/your-topic"
 NTFY_TOKEN=""
 ```
 
@@ -220,7 +227,7 @@ The installer will:
 Then edit `~/.config/seclog-linux/config`:
 
 ```bash
-NTFY_URL="https://ntfy.sh/your-unique-topic"
+NTFY_URL="https://ntfy.example.com/your-topic"
 NTFY_TOKEN=""  # only if your ntfy needs auth
 ```
 
@@ -250,11 +257,21 @@ The installer creates this file on first run:
 Available settings:
 
 ```bash
-# Full ntfy topic URL
-NTFY_URL="http://YOUR_NTFY_HOST:2586/YOUR_TOPIC"
+# Full ntfy topic URL. Plaintext http:// is refused for anything outside the
+# local network — the push profiles this host and the token rides along.
+NTFY_URL="https://ntfy.example.com/YOUR_TOPIC"
 
 # Optional bearer token for protected ntfy instances
 NTFY_TOKEN=""
+
+# Accept plaintext HTTP to a non-local address anyway (VPN, tunnel, ...)
+NTFY_ALLOW_PLAINTEXT=0
+
+# Who announces a successful login: monitor | banner | both
+LOGIN_PUSH_SOURCE="monitor"
+
+# Seconds to collapse repeated logins from the same account and address
+LOGIN_DEDUP_WINDOW=60
 
 # How far back the login banner should summarize failed attempts
 FAIL_LOOKBACK="24 hours ago"
@@ -271,8 +288,8 @@ NTFY_TIMEOUT=5
 # Days of silence after which an IP's rate-limit state file is discarded
 STATE_TTL_DAYS=7
 
-# Push payload detail level: full or minimal
-PUSH_METADATA_LEVEL="full"
+# Push payload detail level: minimal or full
+PUSH_METADATA_LEVEL="minimal"
 
 # Allow seclog-update to use a custom SECLOG_REPO_DIR
 ALLOW_CUSTOM_REPO_DIR=0
@@ -280,12 +297,22 @@ ALLOW_CUSTOM_REPO_DIR=0
 # Expected origin remotes for seclog-update
 EXPECTED_UPDATE_ORIGIN="https://github.com/arn-c0de/seclog-linux.git"
 EXPECTED_UPDATE_ORIGIN_ALT="git@github.com:arn-c0de/seclog-linux.git"
+
+# Identity the update commit must be signed by. Required for --yes.
+UPDATE_SIGNER=""
 ```
+
+The config is *sourced* by every command, so it runs as shell code, and it
+holds the update trust settings. seclog refuses to start if it is writable by
+anyone but you; the installer keeps it at `0600` in a `0700` directory.
 
 What the settings do:
 
-- `NTFY_URL`: Full topic endpoint including server and topic path.
-- `NTFY_TOKEN`: Optional token for authenticated ntfy servers.
+- `NTFY_URL`: Full topic endpoint including server and topic path. Must be `https://` unless the host is on the local network.
+- `NTFY_TOKEN`: Optional token for authenticated ntfy servers. It is handed to curl through a config file rather than the command line, so it does not appear in `/proc/<pid>/cmdline`.
+- `NTFY_ALLOW_PLAINTEXT`: Set to `1` to permit plaintext HTTP to a non-local address. Only sensible when the path is protected some other way.
+- `LOGIN_PUSH_SOURCE`: `monitor` (default) announces every login including non-interactive ones; `banner` only interactive bash; `both` sends two pushes per interactive login.
+- `LOGIN_DEDUP_WINDOW`: Collapses repeated logins from the same account and address, so a loop of `scp` calls is not a notification storm.
 - `FAIL_LOOKBACK`: Human-readable window shown in the banner, for example `1 hour ago` or `7 days ago`.
 - `FAIL_RATELIMIT_WINDOW`: Prevents push spam during brute-force attempts.
 - `JOURNAL_TIMEOUT`: Caps how long the login banner waits on `journalctl` before continuing. `0` disables the timeout. The old name `LOGIN_JOURNAL_TIMEOUT` is still accepted.
@@ -294,6 +321,7 @@ What the settings do:
 - `PUSH_METADATA_LEVEL`: Set to `minimal` to omit UID, groups, reverse-DNS host, TTY and SSH key fingerprint from login pushes.
 - `ALLOW_CUSTOM_REPO_DIR`: Keeps `seclog-update` pinned to `~/Projects/seclog-linux` unless you explicitly allow another checkout path.
 - `EXPECTED_UPDATE_ORIGIN` / `EXPECTED_UPDATE_ORIGIN_ALT`: `seclog-update` aborts if `origin` does not match one of these remotes.
+- `UPDATE_SIGNER`: The identity the update commit must be signed by. Leave it empty and any identity your git trust store accepts can ship you code; `seclog-update --yes` refuses to run without it. See `SECURITY.md`.
 
 `PUSH_METADATA_LEVEL` changes the login push payload like this:
 
@@ -462,7 +490,10 @@ Then verify the two real event paths:
 
 | Symptom | Likely cause / fix |
 |---|---|
-| `seclog` shows data, but no push arrives | `NTFY_URL` wrong, `NTFY_TOKEN` wrong, or ntfy is unreachable. Test with `curl` directly. |
+| `seclog` shows data, but no push arrives | Run `seclog-diagnose`, then `journalctl -t seclog-linux -n 20` — every push and every failure is recorded there. |
+| `push REFUSED ... plaintext HTTP` | `NTFY_URL` is `http://` to a non-local host. Use `https://` or set `NTFY_ALLOW_PLAINTEXT=1`. |
+| `refusing to source ... config` | `chmod 600 ~/.config/seclog-linux/config` and `chmod 700` its directory. |
+| `seclog-update` always aborts | Signature verification is not configured. See "Signed update verification" in `SECURITY.md`. |
 | `curl` or seclog gets `403 forbidden` from ntfy | Your ntfy server requires auth and `NTFY_TOKEN` is missing or invalid. Put a valid `tk_...` token into `~/.config/seclog-linux/config`, then run `seclog-restart`. |
 | Login banner does not appear on SSH | `.bashrc` only runs for interactive shell sessions. Test with `ssh -t host`. |
 | Failed-login pushes do not arrive | Check `systemctl --user status seclog-monitor` and `journalctl --user -u seclog-monitor -n 50`. |
@@ -500,19 +531,37 @@ config and state cache untouched.
 
 ## Security notes
 
-- Only **interactive** SSH logins trigger the banner/push (`.bashrc` isn't
-  sourced for `ssh host cmd` / `scp` / `sftp`). The failed-login daemon catches
-  *all* authentication failures via `journalctl`, regardless of session type.
-- The SSH key *fingerprint* in the push is a SHA256 of the **public** key —
-  it cannot be used to impersonate you. It's useful as an authenticity anchor:
-  a fingerprint you don't recognize = unknown device logging in.
-- If you want lower disclosure in notifications, set
-  `PUSH_METADATA_LEVEL="minimal"` in `~/.config/seclog-linux/config`.
-- ntfy over plain HTTP within a trusted LAN is acceptable; for anything
-  traversing the internet, put TLS in front of it.
-- The daemon rate-limits pushes to one per source-IP per 5 minutes (configurable
-  via `FAIL_RATELIMIT_WINDOW`) to survive brute-force floods without DoS-ing
-  your phone.
+- **Every** login is announced, not just interactive ones. `seclog-monitor`
+  reads the journal, so `ssh host cmd`, `scp`, `sftp`, `rsync` and non-bash
+  shells are covered too. That only holds while the user service runs — enable
+  lingering (`sudo loginctl enable-linger "$USER"`) so it survives logout.
+- Pushes are **refused over plaintext HTTP** to anything outside the local
+  network. The body profiles the machine and the token travels with it. Use
+  TLS, or set `NTFY_ALLOW_PLAINTEXT=1` if the path is protected another way.
+- The token, URL and body never appear in `curl`'s command line, because
+  `/proc/<pid>/cmdline` is readable by every other local account.
+- The config is sourced as shell code and carries the update trust settings, so
+  seclog refuses to run if it is writable by anyone but you.
+- `PUSH_METADATA_LEVEL` defaults to `minimal`. `full` adds uid, groups,
+  reverse-DNS and the SSH key fingerprint — useful when investigating, but on a
+  public ntfy topic it hands a stranger a map of the machine.
+- The SSH key *fingerprint* in a `full` push is a SHA256 of the **public** key —
+  it cannot be used to impersonate you. It is useful as an authenticity anchor:
+  a fingerprint you do not recognise means an unknown device logged in.
+- Log parsing treats the attempted user name as hostile. It is attacker chosen
+  and sshd only escapes control characters, so seclog reads the peer address
+  from the end of the line and the account name positionally — otherwise a name
+  like `x from 203.0.113.9 port 1` could forge the reported source and silence
+  the rate limiter. See `SECURITY.md`.
+- Failed-login pushes are rate limited to one per source IP per five minutes
+  (`FAIL_RATELIMIT_WINDOW`), so a brute-force run cannot flood your phone.
+  Suppressed attempts are counted and reported in the next push.
+- Every push attempt and every failure is written to the journal under the tag
+  `seclog-linux` (`journalctl -t seclog-linux`). The journal is not writable by
+  the monitored account, so that record survives an account takeover — but
+  future notifications do not. seclog runs as the user it watches and cannot
+  defend against someone who already holds that account; see the threat model
+  in `SECURITY.md`.
 
 ## Security contact
 

@@ -23,7 +23,7 @@ section() { printf '\n[ %s ]\n' "$1"; }
 printf '── seclog-linux %s diagnostics ──\n' "$SECLOG_VERSION"
 
 section "Prerequisites"
-for cmd in curl awk sort ss who getent timeout journalctl systemctl; do
+for cmd in curl awk sort ss who getent timeout journalctl systemctl logger git; do
     if command -v "$cmd" >/dev/null 2>&1; then
         ok "$cmd found"
     else
@@ -39,11 +39,13 @@ fi
 section "Config"
 if [[ -f $SECLOG_CONFIG ]]; then
     ok "config found: $SECLOG_CONFIG"
-    perms="$(stat -c '%a' "$SECLOG_CONFIG" 2>/dev/null || echo '?')"
-    if [[ $perms == 600 || $perms == 400 ]]; then
-        ok "config permissions are $perms"
+    perms="$(stat -Lc '%a' "$SECLOG_CONFIG" 2>/dev/null || echo '?')"
+    if seclog_path_is_trusted "$SECLOG_CONFIG"; then
+        ok "config permissions are $perms and it is owned by you"
     else
-        warning "config is mode $perms — it may hold a token; run: chmod 600 $SECLOG_CONFIG"
+        # seclog_load_config would already have refused to run, so this only
+        # shows up when the config changed underneath a running install.
+        failure "config is mode $perms and writable by others or foreign-owned — every seclog command sources it; run: chmod 600 $SECLOG_CONFIG"
     fi
 else
     failure "config missing: $SECLOG_CONFIG — run install.sh first"
@@ -51,11 +53,28 @@ fi
 
 if seclog_ntfy_configured; then
     ok "NTFY_URL set: $NTFY_URL"
+    if [[ $NTFY_URL == https://* ]]; then
+        ok "ntfy transport is TLS"
+    elif seclog_transport_ok; then
+        warning "ntfy transport is plaintext HTTP — accepted because the target is local or NTFY_ALLOW_PLAINTEXT=1"
+    else
+        failure "ntfy transport is plaintext HTTP to a non-local address — pushes are refused; use https:// or set NTFY_ALLOW_PLAINTEXT=1"
+    fi
     if [[ -n $NTFY_TOKEN ]]; then
         ok "NTFY_TOKEN set"
     else
         warning "NTFY_TOKEN empty (fine for public topics)"
     fi
+    if [[ $PUSH_METADATA_LEVEL == full ]]; then
+        warning "PUSH_METADATA_LEVEL=full — pushes carry uid, groups, rDNS and the SSH key fingerprint"
+    else
+        ok "PUSH_METADATA_LEVEL=$PUSH_METADATA_LEVEL"
+    fi
+    case "$LOGIN_PUSH_SOURCE" in
+        monitor|both) ok "login pushes come from the monitor, which sees every login" ;;
+        banner)       warning "LOGIN_PUSH_SOURCE=banner — only interactive bash logins are announced; scp, sftp, rsync and non-interactive ssh commands are not" ;;
+        *)            failure "LOGIN_PUSH_SOURCE=$LOGIN_PUSH_SOURCE is not one of monitor|banner|both" ;;
+    esac
 else
     failure "NTFY_URL not configured in $SECLOG_CONFIG"
 fi
@@ -101,6 +120,38 @@ if loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
     ok "lingering is enabled (monitor survives logout)"
 else
     warning "lingering is off — the monitor stops on logout; run: sudo loginctl enable-linger $USER"
+fi
+
+section "Update trust"
+# seclog-update fetches code and then runs its installer, so the signature
+# checks are the last line of defence for the whole install.
+repo="${SECLOG_REPO_DIR:-$HOME/Projects/seclog-linux}"
+if [[ -d $repo/.git ]]; then
+    ok "checkout found: $repo"
+
+    sig_format="$(git -C "$repo" config --get gpg.format || echo openpgp)"
+    ok "commit signature format: $sig_format"
+
+    if [[ $sig_format == ssh ]]; then
+        signers="$(git -C "$repo" config --get gpg.ssh.allowedSignersFile || true)"
+        if [[ -z $signers ]]; then
+            failure "gpg.ssh.allowedSignersFile is unset — every seclog-update will abort"
+            printf '         git -C %s config gpg.ssh.allowedSignersFile ~/.config/seclog-linux/allowed_signers\n' "$repo"
+        elif [[ ! -f ${signers/#\~/$HOME} ]]; then
+            failure "gpg.ssh.allowedSignersFile points at a missing file: $signers"
+        else
+            ok "allowed signers file present: $signers"
+        fi
+    fi
+
+    if [[ -n ${UPDATE_SIGNER:-} ]]; then
+        ok "UPDATE_SIGNER pinned: $UPDATE_SIGNER"
+    else
+        warning "UPDATE_SIGNER is not set — any identity your git trust store accepts can ship you code"
+        warning "  fix: add UPDATE_SIGNER=\"<the maintainer's signing identity>\" to $SECLOG_CONFIG"
+    fi
+else
+    warning "no checkout at $repo — seclog-update is unavailable (that is fine if you installed from a tarball)"
 fi
 
 printf '\n── Result: %d ok, %d warnings, %d failures ──\n' "$pass" "$warn" "$fail"

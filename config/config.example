@@ -1,24 +1,50 @@
 # seclog-linux configuration.
 # Installed to ~/.config/seclog-linux/config — the installer never overwrites it.
-# This file may hold an auth token, so keep it at mode 0600.
+#
+# This file is *sourced* by every seclog command, so its contents run as shell
+# code, and it carries the update trust settings below. seclog refuses to start
+# if it is not owned by you or is writable by group or others. Keep it at 0600.
 
 # ── ntfy ─────────────────────────────────────────────────────────────────
-# Full topic URL (server + topic), http or https, public or self-hosted.
+# Full topic URL (server + topic). Self-hosting is strongly recommended: every
+# push carries login metadata, and on a public server the topic name is the
+# only thing keeping strangers out.
+#   https://ntfy.example.com/ssh-login
 #   https://ntfy.sh/your-unique-topic
-#   http://192.168.1.10:2586/ssh-login
-# Self-hosting is strongly recommended: every push carries login metadata.
 NTFY_URL="http://YOUR_NTFY_HOST:2586/YOUR_TOPIC"
 
 # Auth token, required only if your ntfy instance enforces authentication.
 NTFY_TOKEN=""
 
+# Plaintext HTTP is refused for anything outside the local network: the push
+# body is a full profile of this host (account, groups, client address, SSH key
+# fingerprint) and the token above travels in the same request. Set this to 1
+# only if the path to your server is trusted some other way, e.g. a VPN or a
+# WireGuard tunnel that terminates elsewhere.
+NTFY_ALLOW_PLAINTEXT=0
+
 # Seconds to wait for ntfy before giving up on a push.
 NTFY_TIMEOUT=5
 
 # How much detail each push carries:
-#   full    = uid, groups, client reverse-DNS, SSH key fingerprint, TTY
 #   minimal = user, source address, auth method and the summary counters only
-PUSH_METADATA_LEVEL="full"
+#   full    = adds uid, groups, client reverse-DNS, SSH key fingerprint, TTY
+# `full` is genuinely useful, but treat it as sensitive: anyone who can read
+# the topic learns how to target this machine.
+PUSH_METADATA_LEVEL="minimal"
+
+# ── Login notifications ──────────────────────────────────────────────────
+# Which component announces a *successful* login:
+#   monitor = seclog-monitor, from the journal. Sees every login, including
+#             scp, sftp, rsync, `ssh host cmd` and non-bash shells.
+#   banner  = the .bashrc hook. Interactive bash only — everything else logs
+#             in silently. Use it only if you cannot run the user service.
+#   both    = both, which means two pushes per interactive login.
+LOGIN_PUSH_SOURCE="monitor"
+
+# Seconds to collapse repeated logins from the same account and address, so a
+# loop of scp calls does not turn into a notification storm.
+LOGIN_DEDUP_WINDOW=60
 
 # ── Reporting ────────────────────────────────────────────────────────────
 # How far back the report scans for failed attempts. Any journalctl --since
@@ -44,3 +70,12 @@ ALLOW_CUSTOM_REPO_DIR=0
 # Accepted `origin` remotes. An update aborts if origin matches neither.
 EXPECTED_UPDATE_ORIGIN="https://github.com/arn-c0de/seclog-linux.git"
 EXPECTED_UPDATE_ORIGIN_ALT="git@github.com:arn-c0de/seclog-linux.git"
+
+# The identity the target commit must be signed by, matched as a substring of
+# what `git verify-commit` reports — the principal from your allowed_signers
+# file for SSH signatures, or the key uid for OpenPGP.
+#
+# Leave it empty and any identity your git trust store happens to accept can
+# ship you code; `seclog-update --yes` refuses to run unattended without it.
+# See "Signed update verification" in SECURITY.md for the full setup.
+UPDATE_SIGNER=""

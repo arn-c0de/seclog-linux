@@ -59,8 +59,17 @@ done
 ok "installed ${#COMMANDS[@]} files to $BIN_DIR"
 
 # ── Config (never overwritten) ───────────────────────────────────────────
+chmod 0700 "$CFG_DIR"
 if [[ -f $CFG_DIR/config ]]; then
     ok "config kept at $CFG_DIR/config"
+    # The config is sourced by every seclog command and holds the update trust
+    # settings, so write access to it is code execution as this user. seclog
+    # refuses to start on a loose one; tighten it here instead of failing later.
+    mode="$(stat -Lc '%a' "$CFG_DIR/config" 2>/dev/null || echo 600)"
+    if (( 8#$mode & 8#077 )); then
+        chmod 0600 "$CFG_DIR/config"
+        note "tightened $CFG_DIR/config from mode $mode to 600"
+    fi
 else
     install -m 0600 "$SRC/config/config.example" "$CFG_DIR/config"
     ok "wrote $CFG_DIR/config — EDIT IT and set NTFY_URL"

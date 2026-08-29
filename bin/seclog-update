@@ -5,7 +5,7 @@
 # Safety rails, all of which must pass before anything is pulled:
 #   1. the checkout lives at the expected path (override needs an explicit opt-in)
 #   2. `origin` points at the expected repository
-#   3. the target commit carries a good GPG signature
+#   3. the target commit carries a good signature from the expected signer
 #   4. the user confirms the change interactively (skip with --yes)
 
 set -euo pipefail
@@ -25,6 +25,11 @@ EXPECTED_ORIGINS=(
     "${EXPECTED_UPDATE_ORIGIN:-https://github.com/arn-c0de/seclog-linux.git}"
     "${EXPECTED_UPDATE_ORIGIN_ALT:-git@github.com:arn-c0de/seclog-linux.git}"
 )
+
+# Identity the target commit must be signed by. For SSH signing this is the
+# principal from the allowed_signers file, for OpenPGP the uid on the key.
+# Matched as a substring so either an e-mail or a full uid works.
+UPDATE_SIGNER="${UPDATE_SIGNER:-}"
 
 ASSUME_YES=0
 [[ ${1:-} == --yes || ${1:-} == -y ]] && ASSUME_YES=1
@@ -77,18 +82,53 @@ fi
 
 printf 'Target:  %s (%s)\n' "$remote_short" "$(git log -1 --pretty=%s "$remote_commit")"
 
-# ── 3. Require a good signature on the target commit ─────────────────────
+# ── 3. Require a good signature from the expected signer ─────────────────
+# The signature format depends on git's gpg.format, and the two backends print
+# different things:
+#   ssh      Good "git" signature for <principal> with ED25519 key SHA256:...
+#   openpgp  gpg: Good signature from "Name <mail>" [ultimate]
+# Accept either, but never accept "exit status 0" on its own — for OpenPGP that
+# only means the key sits in the local keyring, which is not a trust decision.
 verify_output=""
 verify_status=0
-verify_output="$(git verify-commit "$remote_commit" 2>&1)" || verify_status=$?
-signer="$(awk '/^Good "git" signature for / { sub(/^Good "git" signature for /, ""); print; exit }' \
-    <<<"$verify_output")"
+verify_output="$(git verify-commit --raw "$remote_commit" 2>&1)" || verify_status=$?
+
+signer="$(awk '
+    /^Good "git" signature for / { sub(/^Good "git" signature for /, ""); sub(/ with .*/, ""); print; exit }
+    /^gpg: Good signature from "/ { sub(/^gpg: Good signature from "/, ""); sub(/".*/, ""); print; exit }
+    /^\[GNUPG:\] GOODSIG /       { sub(/^\[GNUPG:\] GOODSIG [0-9A-Fa-f]+ /, ""); print; exit }
+' <<<"$verify_output")"
 
 if (( verify_status != 0 )) || [[ -z $signer ]]; then
-    printf 'VERIFIED: no — aborting\n%s\n' "$verify_output" >&2
+    printf 'VERIFIED: no — aborting\n' >&2
+    printf '%s\n' "$verify_output" >&2
+    if [[ $verify_output == *allowedSignersFile* || $verify_output == *"allowed keys file"* \
+       || $verify_output == *"No principal matched"* ]]; then
+        cat >&2 <<'HINT'
+
+Signature verification is not set up on this host. For SSH-signed commits:
+  printf '%s %s\n' <signer-id> "$(cat /path/to/signing_key.pub)" > ~/.config/seclog-linux/allowed_signers
+  git config gpg.format ssh
+  git config gpg.ssh.allowedSignersFile ~/.config/seclog-linux/allowed_signers
+HINT
+    fi
     exit 1
 fi
-printf 'VERIFIED: yes (%s)\n' "$signer"
+
+if [[ -n $UPDATE_SIGNER ]]; then
+    if [[ $signer != *"$UPDATE_SIGNER"* ]]; then
+        printf 'VERIFIED: no — signed by an unexpected identity, aborting\n' >&2
+        printf '  expected: %s\n  got:      %s\n' "$UPDATE_SIGNER" "$signer" >&2
+        exit 1
+    fi
+    printf 'VERIFIED: yes (%s, matches UPDATE_SIGNER)\n' "$signer"
+else
+    printf 'VERIFIED: yes (%s)\n' "$signer"
+    printf 'WARNING:  UPDATE_SIGNER is not set in %s, so any identity your git\n' "$SECLOG_CONFIG" >&2
+    printf '          trust store accepts can ship you code. Pin it.\n' >&2
+    # Unattended runs must pin the signer: there is nobody to read the warning.
+    (( ASSUME_YES )) && die "--yes requires UPDATE_SIGNER to be set in $SECLOG_CONFIG"
+fi
 
 # ── 4. Confirm, then apply ───────────────────────────────────────────────
 if (( ! ASSUME_YES )); then

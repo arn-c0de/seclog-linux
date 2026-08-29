@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# seclog-login — SSH login banner + push notification.
+# seclog-login — SSH login banner (and, optionally, the login push).
 #
 # Started by the .bashrc hook on interactive SSH logins. It prints the security
-# report to the terminal and sends a push to ntfy in the background, so a slow
-# or unreachable ntfy server never delays the login.
+# report to the terminal and, when LOGIN_PUSH_SOURCE says so, sends a push in
+# the background so a slow or unreachable ntfy server never delays the login.
+#
+# Note that this hook only ever runs for interactive bash: `ssh host cmd`, scp,
+# sftp, rsync and other shells never reach it. seclog-monitor watches the
+# journal instead and therefore sees every login, which is why it owns the
+# login push by default.
 
 set -uo pipefail
 
@@ -30,14 +35,18 @@ HELP
 printf '\n'
 
 # ── Push notification ─────────────────────────────────────────────────────
+# By default seclog-monitor sends this, because it also catches the logins that
+# never start an interactive shell.
+[[ $LOGIN_PUSH_SOURCE == banner || $LOGIN_PUSH_SOURCE == both ]] || exit 0
 seclog_ntfy_configured || exit 0
 
 read -r client_ip client_port _server_ip _server_port <<<"$SSH_CONNECTION"
 
 # The `Accepted ...` line for this very session tells us how we authenticated.
 auth_line="$(seclog_journal -r _COMM=sshd-session |
-    grep -m1 -E "Accepted .* for $USER from $client_ip")"
-auth_method="$(awk '{ for (i = 1; i < NF; i++) if ($i == "Accepted") print $(i + 1) }' <<<"$auth_line")"
+    awk -v needle=" for $USER from $client_ip " '
+        index($0, "Accepted ") && index($0, needle) { print; exit }')"
+auth_method="$(awk "$SECLOG_AWK_LIB"'{ print auth_method(); exit }' <<<"$auth_line")"
 key_type="$(grep -oE 'ED25519|RSA|ECDSA|DSA' <<<"$auth_line" | head -1)"
 key_fingerprint="$(grep -oE 'SHA256:[A-Za-z0-9+/=]+' <<<"$auth_line" | head -1)"
 

@@ -1,14 +1,21 @@
 [Unit]
-Description=seclog-linux failed-login monitor (pushes to ntfy)
+Description=seclog-linux SSH login monitor (pushes to ntfy)
 Documentation=https://github.com/arn-c0de/seclog-linux
 After=network-online.target
 Wants=network-online.target
 
+# A misconfigured ntfy target makes the monitor exit with EX_CONFIG (78) rather
+# than crash-looping. Everything else may restart, but not faster than five
+# times in five minutes.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/seclog-monitor
-Restart=always
+Restart=on-failure
 RestartSec=10
+RestartPreventExitStatus=78
 
 # Hardening — the monitor only reads the journal and talks to ntfy.
 NoNewPrivileges=true
@@ -16,10 +23,13 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ProtectKernelTunables=true
+ProtectKernelModules=true
 ProtectControlGroups=true
+ProtectClock=true
 RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=true
 MemoryDenyWriteExecute=true
 SystemCallFilter=@system-service
