@@ -1,50 +1,104 @@
 #!/usr/bin/env bash
-# seclog — show the current SSH security status. Read-only, sends no push.
+# seclog — command line entry point.
+#
+#   seclog [status] [--json] [lookback]   report (default), sends no push
+#   seclog diagnose [--no-push]           health check
+#   seclog update [--yes] [--channel C]   signed update of a git checkout
+#   seclog restart                        restart the monitor service
+#   seclog test-push [message]            send a test notification
+#   seclog version | help
+#
+# The subcommands live in seclog-<name> next to this file; those names keep
+# working on their own for scripts and habits from before 1.0.3.
 
 set -uo pipefail
 
-SECLOG_LIB="$(dirname "$(readlink -f "$0")")/seclog-lib.sh"
-[[ -f $SECLOG_LIB ]] || SECLOG_LIB="$HOME/.local/bin/seclog-lib.sh"
+SECLOG_BIN_DIR="$(dirname "$(readlink -f "$0")")"
+SECLOG_LIB="$SECLOG_BIN_DIR/seclog-lib.sh"
+[[ -f $SECLOG_LIB ]] || { SECLOG_BIN_DIR="$HOME/.local/bin"; SECLOG_LIB="$SECLOG_BIN_DIR/seclog-lib.sh"; }
 # shellcheck source=seclog-lib.sh
 . "$SECLOG_LIB"
 
 usage() {
     cat <<'HELP'
-Usage: seclog [lookback]
+Usage: seclog [status] [--json] [lookback]
+       seclog diagnose [--no-push]
+       seclog update [--yes] [--channel release|branch]
+       seclog restart
+       seclog test-push [message]
+       seclog version
+       seclog help
 
-Shows active TCP connections, recent successful SSH logins and failed login
-attempts. Nothing is pushed to ntfy — use this to inspect the machine you are
-already on.
+Commands:
+  status      Active TCP connections, recent SSH logins and failed attempts
+              for this machine. Nothing is pushed to ntfy. This is the default.
+  diagnose    Check dependencies, config, permissions and the monitor service.
+  update      Fast-forward the installed git checkout to the newest signed
+              release (or signed branch tip) and re-run the installer.
+  restart     Reload systemd user units and restart seclog-monitor.
+  test-push   Send a low-priority test notification to the configured topic.
+  version     Print the version.
 
-Arguments:
-  lookback      How far back to scan for failed attempts, in any format
-                journalctl --since accepts. Default: the FAIL_LOOKBACK value
-                from the config, or "24 hours ago".
-
-Options:
-  -h, --help    Show this help.
-  -V, --version Show the version.
+Status options:
+  --json      Emit the report as one JSON document instead of text.
+  lookback    How far back to scan for failed attempts, in any format
+              journalctl --since accepts. Default: FAIL_LOOKBACK from the
+              config, or "24 hours ago".
 
 Examples:
   seclog
   seclog "1 hour ago"
-  seclog "2024-01-01"
+  seclog status --json | jq .failures.total
+  seclog diagnose --no-push
 HELP
 }
 
-seclog_load_config
-seclog_init_colors
+# ── Subcommand dispatch ──────────────────────────────────────────────────
+run_sub() {
+    local name="$1"; shift
+    local target="$SECLOG_BIN_DIR/seclog-$name"
+    [[ -x $target ]] || { printf 'seclog: %s is not installed (%s)\n' "$name" "$target" >&2; exit 127; }
+    exec "$target" "$@"
+}
 
-# FAIL_LOOKBACK and JOURNAL_TIMEOUT are read back by the library functions.
-# shellcheck disable=SC2034
 case "${1:-}" in
-    -h|--help)    usage; exit 0 ;;
-    -V|--version) printf 'seclog %s\n' "$SECLOG_VERSION"; exit 0 ;;
-    -*)           printf 'seclog: unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
-    ?*)           FAIL_LOOKBACK="$1" ;;
+    diagnose|update|restart) run_sub "$1" "${@:2}" ;;
+    version|-V|--version)    printf 'seclog %s\n' "$SECLOG_VERSION"; exit 0 ;;
+    help|-h|--help)          usage; exit 0 ;;
+    test-push)
+        seclog_load_config
+        shift
+        msg="${*:-Test push from $HOSTNAME at $(seclog_now)}"
+        if seclog_push "seclog test" "wrench" "low" "$msg"; then
+            echo "test push sent to $(seclog_mask_url "$NTFY_URL")"
+            exit 0
+        fi
+        exit 1
+        ;;
+    status) shift ;;
 esac
 
+# ── status ───────────────────────────────────────────────────────────────
+seclog_load_config
+
+json=0
+while (( $# )); do
+    case "$1" in
+        --json) json=1 ;;
+        -h|--help) usage; exit 0 ;;
+        -*) printf 'seclog: unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+        *)  FAIL_LOOKBACK="$1" ;;
+    esac
+    shift
+done
+
 # Interactive use can afford to wait longer for journald than a login banner.
+# shellcheck disable=SC2034  # read by the library
 JOURNAL_TIMEOUT="${SECLOG_CLI_JOURNAL_TIMEOUT:-10}"
 
-seclog_print_report
+if (( json )); then
+    seclog_print_report_json
+else
+    seclog_init_colors
+    seclog_print_report
+fi

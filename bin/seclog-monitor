@@ -8,6 +8,12 @@
 # a notification. Successful logins are therefore reported from here by
 # default (LOGIN_PUSH_SOURCE).
 #
+# Pipeline:  journalctl -f -o json | awk (parse, one process) | bash (rate
+# limit, push). The journal cursor of the last handled event is saved after
+# every event, so a restart — reboot, update, crash — resumes exactly where the
+# previous instance stopped instead of silently skipping whatever happened in
+# between.
+#
 # Rate limit: at most one failure push per source IP per FAIL_RATELIMIT_WINDOW
 # seconds, so a brute-force run produces a handful of notifications instead of
 # thousands. Suppressed attempts are counted and reported in the next push.
@@ -30,78 +36,93 @@ if ! seclog_ntfy_configured; then
     exit "$EX_CONFIG"
 fi
 if ! seclog_transport_ok; then
-    seclog_log err "not starting: $NTFY_URL is plaintext HTTP to a non-local address; use https:// or set NTFY_ALLOW_PLAINTEXT=1"
+    seclog_log err "not starting: $(seclog_mask_url "$NTFY_URL") is plaintext HTTP to a non-local address; use https:// or set NTFY_ALLOW_PLAINTEXT=1"
     exit "$EX_CONFIG"
 fi
 
-STATE_DIR="${STATE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/seclog-linux}"
+STATE_DIR="$SECLOG_STATE_DIR"
 if ! mkdir -p "$STATE_DIR"; then
     seclog_log err "cannot create state directory $STATE_DIR — rate limiting would be disabled"
     exit "$EX_CONFIG"
 fi
+CURSOR_FILE="$STATE_DIR/journal.cursor"
 
 # Drop state for IPs we have not heard from in a while, so the directory does
 # not grow without bound on an internet-facing host.
-find "$STATE_DIR" -maxdepth 1 -type f -mtime "+$STATE_TTL_DAYS" -delete 2>/dev/null || true
+find "$STATE_DIR" -maxdepth 1 -type f \( -name 'fail-*' -o -name 'login-*' \) \
+    -mtime "+$STATE_TTL_DAYS" -delete 2>/dev/null || true
 
 if seclog_journal_restricted; then
-    seclog_log warning "$USER cannot read sshd journal entries; add it to the systemd-journal group and re-login"
+    seclog_log warning "$USER cannot read the system journal; add the account to the systemd-journal group and re-login"
 fi
 
-seclog_log notice "monitor started (login pushes: $LOGIN_PUSH_SOURCE, window: ${FAIL_RATELIMIT_WINDOW}s)"
+# ── Resume point ─────────────────────────────────────────────────────────
+# A saved cursor that journald no longer knows (vacuumed, or from another
+# machine's journal) makes journalctl fail immediately, so validate it first.
+start_args=(-n 0)
+if [[ -s $CURSOR_FILE ]]; then
+    IFS= read -r saved_cursor <"$CURSOR_FILE" || saved_cursor=""
+    if [[ -n $saved_cursor ]] &&
+        journalctl -q -n 0 --after-cursor="$saved_cursor" "${SECLOG_SSHD_MATCH[@]}" >/dev/null 2>&1; then
+        start_args=(--after-cursor="$saved_cursor")
+        seclog_log notice "resuming from the saved journal cursor"
+    else
+        seclog_log warning "saved journal cursor is unusable, starting from now"
+        rm -f "$CURSOR_FILE"
+    fi
+fi
 
-# Turn one journal line into "<kind>\t<user>\t<ip>\t<port>\t<reason>", or
-# nothing when the line carries no usable source address.
-parse_event() {
-    awk "$SECLOG_AWK_LIB"'
-        BEGIN { OFS = "\t" }
-        {
-            ip = peer_ip()
-            if (ip == "") next
-
-            if (index($0, "Accepted ")) {
-                print "ok", login_user(), ip, peer_port(), auth_method()
-                next
-            }
-
-            reason = "authentication failure"
-            if      (index($0, "Failed password")) reason = "failed password"
-            else if (index($0, "Invalid user"))    reason = "invalid user"
-            else if (index($0, "Disconnected"))    reason = "disconnected while authenticating"
-
-            print "fail", login_user(), ip, peer_port(), reason
-        }'
-}
+seclog_log notice "monitor started (login pushes: $LOGIN_PUSH_SOURCE, window: ${FAIL_RATELIMIT_WINDOW}s, replay max age: ${REPLAY_MAX_AGE}s)"
 
 # Read "<epoch> <count>" from a state file, rejecting anything that is not a
 # plain number. The values feed an arithmetic context, where bash would happily
 # evaluate `a[$(command)]`.
 read_state() {
-    local file="$1"
+    local file="$1" stamp count
     state_stamp=0; state_count=0
     [[ -f $file ]] || return 0
-    local stamp count
     read -r stamp count <"$file" || return 0
     [[ ${stamp:-} =~ ^[0-9]+$ ]] && state_stamp="$stamp"
     [[ ${count:-} =~ ^[0-9]+$ ]] && state_count="$count"
     return 0
 }
 
-journalctl -f -n 0 --no-pager "${SECLOG_SSHD_MATCH[@]}" 2>/dev/null |
-while IFS= read -r line; do
-    case "$line" in
-        *"Accepted "*) ;;
-        *"Failed password for "*|*"Invalid user "*|*"authentication failure"*|*"Disconnected from authenticating user"*) ;;
-        *) continue ;;
-    esac
+save_cursor() {
+    [[ -n $1 ]] || return 0
+    printf '%s\n' "$1" >"$CURSOR_FILE.tmp" && mv -f "$CURSOR_FILE.tmp" "$CURSOR_FILE"
+}
 
-    IFS=$'\t' read -r kind user ip port reason < <(parse_event <<<"$line")
+stale=0
+
+journalctl -f --no-pager -o json "${start_args[@]}" "${SECLOG_SSHD_MATCH[@]}" 2>/dev/null |
+    seclog_parse_events |
+while IFS=$'\t' read -r kind user ip port reason epoch cursor; do
     [[ -n ${ip:-} ]] || continue
+    save_cursor "$cursor"
 
-    now="$(date +%s)"
+    now="$EPOCHSECONDS"
     # The IP is already validated by the parser; the substitution is belt and
     # braces so a state file can never escape the directory.
     safe_ip="${ip//[^0-9A-Za-z.:_-]/_}"
+
+    # Catching up after downtime: old events are recorded, not announced. A
+    # push about a login from last week is noise, and a brute-force backlog
+    # would arrive as one burst.
+    if (( epoch > 0 && now - epoch > REPLAY_MAX_AGE )); then
+        (( ++stale ))
+        if [[ $kind == fail ]]; then
+            state="$STATE_DIR/fail-$safe_ip"
+            read_state "$state"
+            printf '%s %s\n' "$state_stamp" "$(( state_count + 1 ))" >"$state"
+        fi
+        continue
+    fi
+    if (( stale > 0 )); then
+        seclog_log notice "skipped $stale event(s) older than ${REPLAY_MAX_AGE}s while catching up"
+        stale=0
+    fi
+
+    when="$(seclog_fmt_time "$epoch")"
 
     if [[ $kind == ok ]]; then
         [[ $LOGIN_PUSH_SOURCE == monitor || $LOGIN_PUSH_SOURCE == both ]] || continue
@@ -118,8 +139,8 @@ while IFS= read -r line; do
             "$(seclog_format_endpoint "$ip" "$port")" \
             "$reason" \
             "$(seclog_geo_or_unknown "$ip")" \
-            "$(hostname)" \
-            "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
+            "$HOSTNAME" \
+            "$when")"
 
         seclog_push "SSH login: $user from $ip" "warning,key" "high" "$body" || true
         continue
@@ -141,7 +162,12 @@ while IFS= read -r line; do
         "$(seclog_geo_or_unknown "$ip")" \
         "$user" \
         "$state_count" \
-        "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
+        "$when")"
 
     seclog_push "SSH FAILED: $user from $ip" "skull,warning" "high" "$body" || true
 done
+
+# The pipeline only ends when journalctl goes away; that is a failure worth a
+# restart, never a clean exit.
+seclog_log err "journal stream ended, exiting so systemd restarts the monitor"
+exit 1

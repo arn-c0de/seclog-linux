@@ -1,5 +1,8 @@
 # Detailed setup guide
 
+The README covers the quick path. This is the long version: a self-hosted
+ntfy server, the phone subscription, the install and the checks.
+
 ## 1. Prepare ntfy (self-hosted)
 
 Run ntfy in Docker (official image):
@@ -22,63 +25,81 @@ docker exec ntfy sh -c 'cat > /etc/ntfy/server.yml' < ntfy/server.yml.example
 docker restart ntfy
 ```
 
-Create an admin user + a never-expiring token:
+Create an admin user and a never-expiring token:
 
 ```bash
-# Password (you'll be prompted)
-docker exec -it ntfy ntfy user add --role=admin myuser
-
-# Token (use this in NTFY_TOKEN)
-docker exec ntfy ntfy token add --expires 0 myuser
+docker exec -it ntfy ntfy user add --role=admin myuser     # prompts for a password
+docker exec ntfy ntfy token add --expires 0 myuser         # -> tk_... for NTFY_TOKEN
 ```
+
+If the server is reachable from outside your LAN, terminate TLS in front of it
+(Caddy, nginx, Traefik) and use the `https://` URL below. seclog refuses to
+push over plaintext HTTP to anything that is not a local address: the push
+body profiles the host and the token rides along.
 
 ## 2. Subscribe from your phone
 
 1. Install the [ntfy Android/iOS app](https://ntfy.sh/app).
 2. Add a subscription to your topic, e.g. `ssh-login`.
-3. **Important:** in the subscription settings, point the server URL to your
-   self-hosted instance (not `ntfy.sh`), and enter your username + password
-   (or access token if the app supports it).
+3. In the subscription settings, point the server URL at your own instance,
+   not `ntfy.sh`, and enter the username and password or the token.
 
 ## 3. Install on the server
 
 ```bash
-git clone git@github.com:arn-c0de/seclog-linux.git
-cd seclog-linux
+git clone https://github.com/arn-c0de/seclog-linux.git ~/Projects/seclog-linux
+cd ~/Projects/seclog-linux
 ./install.sh
 ```
 
-Edit `~/.config/seclog-linux/config`:
+Edit `~/.config/seclog-linux/config`. It is a plain `KEY=value` file, not a
+shell script, so write values out literally:
 
-```bash
+```
 NTFY_URL="https://ntfy.example.com/ssh-login"
 NTFY_TOKEN="tk_yourtokenhere"
-FAIL_LOOKBACK="24 hours ago"
-FAIL_RATELIMIT_WINDOW=300
 
-# Pin who is allowed to ship you updates (see SECURITY.md).
+# Pin who may ship you updates (see SECURITY.md).
 UPDATE_SIGNER="maintainer@example.com"
 ```
 
-`https://` is not decoration. The push body profiles this host — account, uid,
-groups, client address, SSH key fingerprint — and the token above travels in
-the same request, so seclog refuses plaintext HTTP to anything outside the
-local network. For a LAN-only server (`http://192.168.x.y:2586/...`) it is
-allowed automatically; for anything else either use TLS or set
-`NTFY_ALLOW_PLAINTEXT=1` to accept the risk deliberately.
+Everything else has a sensible default; the complete list with explanations
+is `config/config.example`.
 
-Enable user-linger so the daemon survives logout:
+For a LAN-only server, `http://192.168.x.y:2586/ssh-login` is accepted
+without further ado. For anything else use TLS or set
+`NTFY_ALLOW_PLAINTEXT=1` deliberately.
+
+Apply the config and let the monitor survive logout:
 
 ```bash
+seclog restart
 sudo loginctl enable-linger "$USER"
 ```
 
-This matters more than it looks: the monitor is what notices *successful*
-logins, including `scp`, `sftp`, `rsync` and `ssh host cmd`. The `.bashrc`
-banner only ever runs for interactive bash. Without lingering the monitor stops
-when you log out, and those logins go unannounced.
+Lingering matters more than it looks: the monitor is what notices *every*
+login, including `scp`, `sftp`, `rsync` and `ssh host cmd`. The `.bashrc`
+banner only ever runs for interactive bash. Without lingering the monitor
+stops when you log out.
+
+If the account cannot read the system journal, `seclog diagnose` says so.
+On most distributions the fix is:
+
+```bash
+sudo usermod -aG systemd-journal "$USER"    # then log out and back in
+```
+
+Optional, for country names in the banner: `mmdblookup` with a GeoLite2
+database (Debian: `apt install mmdb-bin`, then drop
+`GeoLite2-Country.mmdb` into `/var/lib/GeoIP/`), or the legacy
+`apt install geoip-bin geoip-database`.
 
 ## 4. Verify
+
+```bash
+seclog diagnose          # every check; sends one test push
+seclog                   # the banner, on demand
+```
 
 Trigger a login push by reconnecting:
 
@@ -87,35 +108,31 @@ exit
 ssh you@server
 ```
 
-You should see the colored banner and get a push within a second or two.
+You should see the banner and get a push within a second or two.
 
-Trigger a failed push from any other machine:
+Trigger a failure push from any other machine:
 
 ```bash
 ssh nosuchuser@YOUR_SERVER
 ```
 
-A push with title `SSH FAILED: nosuchuser from ...` should arrive.
+A push titled `SSH FAILED: nosuchuser from ...` should arrive.
 
-## 5. Ad-hoc status query
-
-Any time after install, any shell on the server can run:
+Every push and every failure to push is written to the journal:
 
 ```bash
-seclog                    # last 24h of fails
-seclog "1 hour ago"       # custom window
-seclog "7 days ago"       # last week
+journalctl -t seclog-linux --since "1 hour ago"
+journalctl --user -u seclog-monitor -n 50
 ```
 
-## Troubleshooting
+## 5. Day to day
 
-| Symptom | Likely cause |
-|---|---|
-| Banner appears, no push arrives | Run `seclog-diagnose`, then check `journalctl -t seclog-linux -n 20` — every push and every failure is logged there. |
-| `push REFUSED ... plaintext HTTP` | `NTFY_URL` is `http://` to a non-local host. Use `https://`, or set `NTFY_ALLOW_PLAINTEXT=1` if the path is protected another way. |
-| `refusing to source ... config` | The config is group/world writable or foreign-owned. `chmod 600 ~/.config/seclog-linux/config` and `chmod 700` its directory. |
-| `seclog-update` always aborts | Signature verification is not set up. See "Signed update verification" in SECURITY.md, or run `seclog-diagnose`. |
-| No failed-attempt pushes | Daemon not running: `systemctl --user status seclog-monitor`. Check logs: `journalctl --user -u seclog-monitor -n 50` |
-| Daemon stops after I log out | `sudo loginctl enable-linger $USER` not done |
-| Banner doesn't appear on SSH | `.bashrc` only runs for **interactive** sessions. Test: `ssh -t host`. For non-interactive logins, catch them via the daemon (which watches the journal). |
-| `last` command missing on new Debian | Expected — Debian 13 moved it to the `wtmpdb` package. Scripts use `journalctl` instead of `last`, so this doesn't matter. |
+```bash
+seclog                        # last 24h of failures
+seclog "1 hour ago"           # custom window
+seclog status --json | jq .   # for scripts
+seclog update                 # signed update of the checkout
+```
+
+Troubleshooting lives in the README's table; the update trust chain and the
+threat model in SECURITY.md.

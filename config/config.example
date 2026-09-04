@@ -1,9 +1,11 @@
 # seclog-linux configuration.
 # Installed to ~/.config/seclog-linux/config — the installer never overwrites it.
 #
-# This file is *sourced* by every seclog command, so its contents run as shell
-# code, and it carries the update trust settings below. seclog refuses to start
-# if it is not owned by you or is writable by group or others. Keep it at 0600.
+# Format: one KEY=value per line, optional quotes, `#` comments. The file is
+# parsed, not executed: no variable expansion, no command substitution, no
+# escapes. Unknown keys are reported and ignored. It still holds the ntfy token
+# and the update trust settings, so keep it at 0600 — seclog refuses to start
+# if it is writable by group or others.
 
 # ── ntfy ─────────────────────────────────────────────────────────────────
 # Full topic URL (server + topic). Self-hosting is strongly recommended: every
@@ -46,6 +48,10 @@ LOGIN_PUSH_SOURCE="monitor"
 # loop of scp calls does not turn into a notification storm.
 LOGIN_DEDUP_WINDOW=60
 
+# Optional text file printed after the login banner — site-specific admin
+# commands, contacts, whatever you want to see at login. Plain text, shown as is.
+#BANNER_EXTRA_FILE="/home/you/.config/seclog-linux/banner.txt"
+
 # ── Reporting ────────────────────────────────────────────────────────────
 # How far back the report scans for failed attempts. Any journalctl --since
 # expression works, e.g. "1 hour ago", "yesterday", "2024-01-01".
@@ -55,6 +61,10 @@ FAIL_LOOKBACK="24 hours ago"
 # slow journal delays your SSH logins; 0 disables the timeout entirely.
 JOURNAL_TIMEOUT=2
 
+# GeoLite2 database for country lookups. Auto-detected in /var/lib/GeoIP and
+# /usr/share/GeoIP when empty; the legacy geoiplookup is used as a fallback.
+#GEOIP_DB="/var/lib/GeoIP/GeoLite2-Country.mmdb"
+
 # ── Failed-login monitor ─────────────────────────────────────────────────
 # At most one push per source IP per window, so a brute-force run cannot flood
 # your phone. Attempts suppressed in between are counted in the next push.
@@ -63,17 +73,28 @@ FAIL_RATELIMIT_WINDOW=300
 # Days of silence after which an IP's rate-limit state file is discarded.
 STATE_TTL_DAYS=7
 
+# The monitor resumes from the last journal position after a restart. Events
+# older than this many seconds are recorded but not pushed while catching up,
+# so a reboot after a long outage does not replay days of history to your phone.
+REPLAY_MAX_AGE=3600
+
 # ── seclog-update ────────────────────────────────────────────────────────
+# What to update to:
+#   release = the newest vX.Y.Z tag on the branch; the tag must be signed
+#   branch  = the tip of the branch; the commit must be signed
+UPDATE_CHANNEL="release"
+
 # Updates only run from $HOME/Projects/seclog-linux unless you opt in here.
+#SECLOG_REPO_DIR="/home/you/src/seclog-linux"
 ALLOW_CUSTOM_REPO_DIR=0
 
 # Accepted `origin` remotes. An update aborts if origin matches neither.
 EXPECTED_UPDATE_ORIGIN="https://github.com/arn-c0de/seclog-linux.git"
 EXPECTED_UPDATE_ORIGIN_ALT="git@github.com:arn-c0de/seclog-linux.git"
 
-# The identity the target commit must be signed by, matched as a substring of
-# what `git verify-commit` reports — the principal from your allowed_signers
-# file for SSH signatures, or the key uid for OpenPGP.
+# The identity the release tag or commit must be signed by, matched as a
+# substring of what git reports — the principal from your allowed_signers file
+# for SSH signatures, or the key uid for OpenPGP.
 #
 # Leave it empty and any identity your git trust store happens to accept can
 # ship you code; `seclog-update --yes` refuses to run unattended without it.

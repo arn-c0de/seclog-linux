@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # seclog-update — fast-forward the installed checkout to the newest signed
-# commit on its current branch, re-run the installer and restart the monitor.
+# release, re-run the installer and restart the monitor.
+#
+# Channels (UPDATE_CHANNEL in the config, or --channel):
+#   release  the newest semver tag reachable from origin/<branch>; the tag
+#            itself must carry a good signature (git verify-tag). Default.
+#   branch   the tip of origin/<branch>; the commit must carry a good
+#            signature (git verify-commit).
 #
 # Safety rails, all of which must pass before anything is pulled:
 #   1. the checkout lives at the expected path (override needs an explicit opt-in)
 #   2. `origin` points at the expected repository
-#   3. the target commit carries a good signature from the expected signer
+#   3. the target carries a good signature from the expected signer
 #   4. the user confirms the change interactively (skip with --yes)
 
 set -euo pipefail
@@ -14,6 +20,34 @@ SECLOG_LIB="$(dirname "$(readlink -f "$0")")/seclog-lib.sh"
 [[ -f $SECLOG_LIB ]] || SECLOG_LIB="$HOME/.local/bin/seclog-lib.sh"
 # shellcheck source=seclog-lib.sh
 . "$SECLOG_LIB"
+
+usage() {
+    cat <<'HELP'
+Usage: seclog-update [--yes] [--channel release|branch]
+
+Fetches the newest signed release (or signed branch tip) of the installed git
+checkout, shows what would change, asks for confirmation, then fast-forwards,
+re-runs install.sh and restarts seclog-monitor.
+
+Options:
+  -y, --yes            Do not ask. Requires UPDATE_SIGNER to be set.
+  --channel CHANNEL    release (default) or branch; overrides UPDATE_CHANNEL.
+  -h, --help           Show this help.
+HELP
+}
+
+ASSUME_YES=0
+CHANNEL_OVERRIDE=""
+while (( $# )); do
+    case "$1" in
+        -y|--yes)   ASSUME_YES=1 ;;
+        --channel)  CHANNEL_OVERRIDE="${2:-}"; shift ;;
+        --channel=*) CHANNEL_OVERRIDE="${1#*=}" ;;
+        -h|--help)  usage; exit 0 ;;
+        *) printf 'seclog-update: unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+done
 
 seclog_load_config
 
@@ -25,16 +59,19 @@ EXPECTED_ORIGINS=(
     "${EXPECTED_UPDATE_ORIGIN:-https://github.com/arn-c0de/seclog-linux.git}"
     "${EXPECTED_UPDATE_ORIGIN_ALT:-git@github.com:arn-c0de/seclog-linux.git}"
 )
+CHANNEL="${CHANNEL_OVERRIDE:-$UPDATE_CHANNEL}"
 
-# Identity the target commit must be signed by. For SSH signing this is the
-# principal from the allowed_signers file, for OpenPGP the uid on the key.
-# Matched as a substring so either an e-mail or a full uid works.
+# Identity the target must be signed by. For SSH signing this is the principal
+# from the allowed_signers file, for OpenPGP the uid on the key. Matched as a
+# substring so either an e-mail or a full uid works.
 UPDATE_SIGNER="${UPDATE_SIGNER:-}"
 
-ASSUME_YES=0
-[[ ${1:-} == --yes || ${1:-} == -y ]] && ASSUME_YES=1
-
 die() { printf 'seclog-update: %s\n' "$*" >&2; exit 1; }
+
+case "$CHANNEL" in
+    release|branch) ;;
+    *) die "UPDATE_CHANNEL must be release or branch, got: $CHANNEL" ;;
+esac
 
 # ── 1. Locate and validate the checkout ──────────────────────────────────
 [[ -d $REPO_DIR/.git ]] || die "no git checkout at $REPO_DIR — set SECLOG_REPO_DIR and retry"
@@ -49,10 +86,12 @@ fi
 
 cd -- "$repo"
 
+# GitHub hands out both forms; a trailing ".git" or "/" is not a different repo.
+normalize_origin() { local o="${1%/}"; printf '%s' "${o%.git}"; }
 origin="$(git remote get-url origin)"
 matched=0
 for candidate in "${EXPECTED_ORIGINS[@]}"; do
-    [[ $origin == "$candidate" ]] && matched=1
+    [[ "$(normalize_origin "$origin")" == "$(normalize_origin "$candidate")" ]] && matched=1
 done
 (( matched )) || die "refusing to update from an unexpected origin: $origin"$'\n'"  expected one of: ${EXPECTED_ORIGINS[*]}"
 
@@ -64,23 +103,38 @@ installer="$repo/install.sh"
 
 # ── 2. Compare local and remote ──────────────────────────────────────────
 echo "== seclog-update =="
-printf 'Repo:    %s\nBranch:  %s\nRemote:  %s\n' "$repo" "$branch" "$origin"
+printf 'Repo:    %s\nBranch:  %s\nRemote:  %s\nChannel: %s\n' "$repo" "$branch" "$origin" "$CHANNEL"
 
-git fetch origin --prune
+git fetch origin --prune --tags
 
 local_commit="$(git rev-parse HEAD)"
-remote_commit="$(git rev-parse "origin/$branch")"
 local_short="$(git rev-parse --short "$local_commit")"
-remote_short="$(git rev-parse --short "$remote_commit")"
-
 printf 'Current: %s (%s)\n' "$local_short" "$(git log -1 --pretty=%s "$local_commit")"
 
+target_tag=""
+if [[ $CHANNEL == release ]]; then
+    # Newest semver tag whose commit is part of the branch we follow.
+    target_tag="$(git tag --list --merged "origin/$branch" --sort=-v:refname |
+        grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
+    [[ -n $target_tag ]] || die "no release tag (vX.Y.Z) is reachable from origin/$branch"$'\n'"  either the maintainer has not tagged a release on this branch yet, or set UPDATE_CHANNEL=branch to follow signed commits"
+    remote_commit="$(git rev-parse "$target_tag^{commit}")"
+    target_label="$target_tag"
+else
+    remote_commit="$(git rev-parse "origin/$branch")"
+    target_label="origin/$branch"
+fi
+remote_short="$(git rev-parse --short "$remote_commit")"
+
 if [[ $local_commit == "$remote_commit" ]]; then
-    echo "Update:  already up to date"
+    printf 'Update:  already up to date (%s)\n' "$target_label"
+    exit 0
+fi
+if git merge-base --is-ancestor "$remote_commit" "$local_commit"; then
+    printf 'Update:  checkout is ahead of %s (%s); nothing to do\n' "$target_label" "$remote_short"
     exit 0
 fi
 
-printf 'Target:  %s (%s)\n' "$remote_short" "$(git log -1 --pretty=%s "$remote_commit")"
+printf 'Target:  %s (%s)%s\n' "$remote_short" "$(git log -1 --pretty=%s "$remote_commit")" "${target_tag:+ [tag $target_tag]}"
 
 # ── 3. Require a good signature from the expected signer ─────────────────
 # The signature format depends on git's gpg.format, and the two backends print
@@ -91,7 +145,13 @@ printf 'Target:  %s (%s)\n' "$remote_short" "$(git log -1 --pretty=%s "$remote_c
 # only means the key sits in the local keyring, which is not a trust decision.
 verify_output=""
 verify_status=0
-verify_output="$(git verify-commit --raw "$remote_commit" 2>&1)" || verify_status=$?
+if [[ -n $target_tag ]]; then
+    verify_output="$(git verify-tag --raw "$target_tag" 2>&1)" || verify_status=$?
+    verified_what="tag $target_tag"
+else
+    verify_output="$(git verify-commit --raw "$remote_commit" 2>&1)" || verify_status=$?
+    verified_what="commit $remote_short"
+fi
 
 signer="$(awk '
     /^Good "git" signature for / { sub(/^Good "git" signature for /, ""); sub(/ with .*/, ""); print; exit }
@@ -100,8 +160,11 @@ signer="$(awk '
 ' <<<"$verify_output")"
 
 if (( verify_status != 0 )) || [[ -z $signer ]]; then
-    printf 'VERIFIED: no — aborting\n' >&2
+    printf 'VERIFIED: no — %s is not signed by a trusted key, aborting\n' "$verified_what" >&2
     printf '%s\n' "$verify_output" >&2
+    if [[ -n $target_tag ]] && ! git cat-file -e "$target_tag^{tag}" 2>/dev/null; then
+        printf 'Note: %s is a lightweight tag; releases must be annotated, signed tags (git tag -s).\n' "$target_tag" >&2
+    fi
     if [[ $verify_output == *allowedSignersFile* || $verify_output == *"allowed keys file"* \
        || $verify_output == *"No principal matched"* ]]; then
         cat >&2 <<'HINT'
@@ -137,6 +200,8 @@ if (( ! ASSUME_YES )); then
 fi
 
 printf 'Updating: %s -> %s\n' "$local_short" "$remote_short"
+# Fast-forward to the exact commit that was verified, never to whatever the
+# ref points at by now.
 git merge --ff-only "$remote_commit"
 
 bash "$installer"
@@ -147,15 +212,14 @@ systemctl --user restart "$SERVICE"
 # ── 5. Announce ──────────────────────────────────────────────────────────
 new_short="$(git rev-parse --short HEAD)"
 subject="$(git log -1 --pretty=%s HEAD)"
-host="$(hostname)"
 ip="$(hostname -I 2>/dev/null | awk '{ print $1 }')"
 [[ -z $ip ]] && ip="$(ip route get 1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }')"
 
-body="$(printf 'Host:    %s\nIP:      %s\nBranch:  %s\nFrom:    %s\nTo:      %s\nCommit:  %s\nSigner:  %s\nTime:    %s' \
-    "$host" "${ip:-unknown}" "$branch" "$local_short" "$new_short" "$subject" "$signer" \
-    "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
+body="$(printf 'Host:    %s\nIP:      %s\nBranch:  %s\nRelease: %s\nFrom:    %s\nTo:      %s\nCommit:  %s\nSigner:  %s\nTime:    %s' \
+    "$HOSTNAME" "${ip:-unknown}" "$branch" "${target_tag:-(branch tip)}" "$local_short" "$new_short" \
+    "$subject" "$signer" "$(seclog_now)")"
 
-seclog_push "seclog updated on $host: $subject" "arrows_counterclockwise,white_check_mark" "default" "$body" || true
+seclog_push "seclog updated on $HOSTNAME: ${target_tag:-$subject}" "arrows_counterclockwise,white_check_mark" "default" "$body" || true
 
 printf 'Service: %s\n' "$(systemctl --user is-active "$SERVICE" || true)"
 printf 'Commit:  %s (%s)\n' "$new_short" "$subject"

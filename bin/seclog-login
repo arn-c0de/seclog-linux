@@ -13,6 +13,10 @@
 set -uo pipefail
 
 [[ -n ${SSH_CONNECTION:-} ]] || exit 0
+# The hook already checks for an interactive shell; this catches a hand-edited
+# .bashrc that calls us unconditionally. A banner written into an scp or rsync
+# stream corrupts the transfer.
+[[ -t 1 ]] || exit 0
 
 SECLOG_LIB="$(dirname "$(readlink -f "$0")")/seclog-lib.sh"
 [[ -f $SECLOG_LIB ]] || SECLOG_LIB="$HOME/.local/bin/seclog-lib.sh"
@@ -26,13 +30,11 @@ seclog_init_colors
 seclog_print_report
 printf '\n'
 
-seclog_heading "$C_BLU" "Admin commands"
-cat <<'HELP'
-  sudo firewall-status       → UFW + ipset + iptables overview
-  sudo ufw status numbered   → UFW rules, numbered
-  sudo ipset list            → device groups
-HELP
-printf '\n'
+# Site-specific hints (admin commands, contacts, ...) live outside the project.
+if [[ -n $BANNER_EXTRA_FILE && -r $BANNER_EXTRA_FILE ]]; then
+    cat -- "$BANNER_EXTRA_FILE"
+    printf '\n'
+fi
 
 # ── Push notification ─────────────────────────────────────────────────────
 # By default seclog-monitor sends this, because it also catches the logins that
@@ -43,9 +45,12 @@ seclog_ntfy_configured || exit 0
 read -r client_ip client_port _server_ip _server_port <<<"$SSH_CONNECTION"
 
 # The `Accepted ...` line for this very session tells us how we authenticated.
-auth_line="$(seclog_journal -r _COMM=sshd-session |
-    awk -v needle=" for $USER from $client_ip " '
-        index($0, "Accepted ") && index($0, needle) { print; exit }')"
+auth_line="$(seclog_journal -r "${SECLOG_SSHD_MATCH[@]}" |
+    awk -v user="$USER" -v ip="$client_ip" "$SECLOG_AWK_LIB"'
+        {
+            if (!use_message()) next
+            if ($1 == "Accepted" && $3 == "for" && $4 == user && $5 == "from" && $6 == ip) { print; exit }
+        }')"
 auth_method="$(awk "$SECLOG_AWK_LIB"'{ print auth_method(); exit }' <<<"$auth_line")"
 key_type="$(grep -oE 'ED25519|RSA|ECDSA|DSA' <<<"$auth_line" | head -1)"
 key_fingerprint="$(grep -oE 'SHA256:[A-Za-z0-9+/=]+' <<<"$auth_line" | head -1)"
@@ -61,7 +66,7 @@ if [[ $PUSH_METADATA_LEVEL == minimal ]]; then
         "$auth_summary" \
         "$SECLOG_CONN_TOTAL" "${SECLOG_CONN_PEERS:-none}" \
         "$FAIL_LOOKBACK" "$SECLOG_FAIL_TOTAL" "$SECLOG_FAIL_IPS" \
-        "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
+        "$(seclog_now)")"
 else
     client_host="$(timeout 1 getent hosts "$client_ip" 2>/dev/null | awk '{ print $2; exit }')"
     tty_name="${SSH_TTY:-$(tty 2>/dev/null)}"
@@ -76,8 +81,8 @@ else
         "$(id -nG 2>/dev/null | tr ' ' ',')" \
         "$SECLOG_CONN_TOTAL" "${SECLOG_CONN_PEERS:-none}" \
         "$FAIL_LOOKBACK" "$SECLOG_FAIL_TOTAL" "$SECLOG_FAIL_IPS" \
-        "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
+        "$(seclog_now)")"
 fi
 
-seclog_push "SSH login: $USER@$(hostname) from $client_ip" "warning,key" "high" "$body" &
+seclog_push "SSH login: $USER@$HOSTNAME from $client_ip" "warning,key" "high" "$body" &
 disown 2>/dev/null || true

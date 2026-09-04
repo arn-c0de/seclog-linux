@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # seclog-diagnose — check that dependencies, config, permissions and the
 # background service are all healthy. Exits non-zero if anything failed.
+#
+#   --no-push   skip the ntfy connectivity check (no notification is sent)
 
 set -uo pipefail
 
@@ -8,6 +10,18 @@ SECLOG_LIB="$(dirname "$(readlink -f "$0")")/seclog-lib.sh"
 [[ -f $SECLOG_LIB ]] || SECLOG_LIB="$HOME/.local/bin/seclog-lib.sh"
 # shellcheck source=seclog-lib.sh
 . "$SECLOG_LIB"
+
+send_push=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-push) send_push=0 ;;
+        -h|--help)
+            echo "Usage: seclog-diagnose [--no-push]"
+            echo "Checks dependencies, config, permissions and the monitor service."
+            exit 0 ;;
+        *) printf 'seclog-diagnose: unknown option: %s\n' "$arg" >&2; exit 2 ;;
+    esac
+done
 
 seclog_load_config
 
@@ -30,11 +44,17 @@ for cmd in curl awk sort ss who getent timeout journalctl systemctl logger git; 
         failure "$cmd not found"
     fi
 done
-if command -v geoiplookup >/dev/null 2>&1; then
-    ok "geoiplookup found (geo-location active)"
+if (( BASH_VERSINFO[0] < 5 )); then
+    failure "bash ${BASH_VERSION} is too old — seclog 1.0.3 and later need bash 5"
 else
-    warning "geoiplookup not found — install: sudo apt install geoip-bin geoip-database"
+    ok "bash $BASH_VERSION"
 fi
+seclog_geo_backend
+case "$SECLOG_GEO_BACKEND" in
+    mmdb)   ok "geo-location via mmdblookup ($SECLOG_GEO_DB)" ;;
+    legacy) warning "geo-location via legacy geoiplookup — its database is unmaintained; prefer libmaxminddb + GeoLite2 (set GEOIP_DB if the file is somewhere unusual)" ;;
+    *)      warning "no geo backend — install mmdblookup (apt: mmdb-bin) with a GeoLite2 database, or geoip-bin + geoip-database" ;;
+esac
 
 section "Config"
 if [[ -f $SECLOG_CONFIG ]]; then
@@ -45,14 +65,14 @@ if [[ -f $SECLOG_CONFIG ]]; then
     else
         # seclog_load_config would already have refused to run, so this only
         # shows up when the config changed underneath a running install.
-        failure "config is mode $perms and writable by others or foreign-owned — every seclog command sources it; run: chmod 600 $SECLOG_CONFIG"
+        failure "config is mode $perms and writable by others or foreign-owned; run: chmod 600 $SECLOG_CONFIG"
     fi
 else
     failure "config missing: $SECLOG_CONFIG — run install.sh first"
 fi
 
 if seclog_ntfy_configured; then
-    ok "NTFY_URL set: $NTFY_URL"
+    ok "NTFY_URL set: $(seclog_mask_url "$NTFY_URL")"
     if [[ $NTFY_URL == https://* ]]; then
         ok "ntfy transport is TLS"
     elif seclog_transport_ok; then
@@ -78,24 +98,31 @@ if seclog_ntfy_configured; then
 else
     failure "NTFY_URL not configured in $SECLOG_CONFIG"
 fi
+if [[ -n $BANNER_EXTRA_FILE ]]; then
+    if [[ -r $BANNER_EXTRA_FILE ]]; then
+        ok "BANNER_EXTRA_FILE readable: $BANNER_EXTRA_FILE"
+    else
+        warning "BANNER_EXTRA_FILE is set but not readable: $BANNER_EXTRA_FILE"
+    fi
+fi
 
 section "Network"
-if seclog_ntfy_configured; then
-    if seclog_push "seclog-diagnose" "wrench" "low" "Test push from $(hostname) at $(date '+%F %T %Z')"; then
-        ok "ntfy reachable and accepted a test push"
-    else
-        failure "ntfy unreachable or auth rejected — check NTFY_URL and NTFY_TOKEN"
-    fi
-else
+if ! seclog_ntfy_configured; then
     warning "skipping ntfy connectivity check (NTFY_URL not configured)"
+elif (( ! send_push )); then
+    warning "skipping ntfy connectivity check (--no-push)"
+elif seclog_push "seclog-diagnose" "wrench" "low" "Test push from $HOSTNAME at $(seclog_now)"; then
+    ok "ntfy reachable and accepted a test push"
+else
+    failure "ntfy unreachable or auth rejected — check NTFY_URL and NTFY_TOKEN"
 fi
 
 section "Permissions"
 if seclog_journal_restricted; then
-    warning "user is not in the systemd-journal group — SSH log history may be empty"
+    warning "this account cannot read the system journal — SSH log history stays empty and the monitor sees nothing"
     warning "  fix: sudo usermod -aG systemd-journal \$USER   (then re-login)"
 else
-    ok "sshd journal is readable"
+    ok "system journal is readable"
 fi
 
 case ":$PATH:" in
@@ -122,6 +149,12 @@ else
     warning "lingering is off — the monitor stops on logout; run: sudo loginctl enable-linger $USER"
 fi
 
+if [[ -s $SECLOG_STATE_DIR/journal.cursor ]]; then
+    ok "journal cursor saved — the monitor resumes where it stopped"
+else
+    warning "no journal cursor yet in $SECLOG_STATE_DIR (normal until the first event was seen)"
+fi
+
 section "Update trust"
 # seclog-update fetches code and then runs its installer, so the signature
 # checks are the last line of defence for the whole install.
@@ -143,6 +176,19 @@ if [[ -d $repo/.git ]]; then
             ok "allowed signers file present: $signers"
         fi
     fi
+
+    case "$UPDATE_CHANNEL" in
+        release)
+            latest="$(git -C "$repo" tag --list --sort=-v:refname 'v[0-9]*' '[0-9]*' 2>/dev/null |
+                grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | head -1)"
+            if [[ -n $latest ]]; then
+                ok "UPDATE_CHANNEL=release — newest known release tag: $latest"
+            else
+                warning "UPDATE_CHANNEL=release but no release tag is known yet — run seclog-update to fetch tags, or set UPDATE_CHANNEL=branch"
+            fi ;;
+        branch) warning "UPDATE_CHANNEL=branch — updates follow the signed tip of the branch rather than tagged releases" ;;
+        *)      failure "UPDATE_CHANNEL=$UPDATE_CHANNEL is not one of release|branch" ;;
+    esac
 
     if [[ -n ${UPDATE_SIGNER:-} ]]; then
         ok "UPDATE_SIGNER pinned: $UPDATE_SIGNER"

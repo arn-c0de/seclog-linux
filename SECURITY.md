@@ -2,9 +2,9 @@
 
 ## Supported versions
 
-This project is currently maintained from the latest published branch state.
-If you report a security issue, assume that only the most recent code in this
-repository is supported unless stated otherwise.
+Only the newest release tag is supported. If you report a security issue,
+assume that only the most recent code in this repository is supported unless
+stated otherwise.
 
 ## Reporting a vulnerability
 
@@ -35,9 +35,10 @@ Reasonable-effort expectations:
 
 Security-relevant areas in this repository include:
 
-- SSH login event handling
-- failed-authentication monitoring
+- SSH login event handling and the sshd log parser
+- failed-authentication monitoring and its rate-limit state
 - ntfy notification transport and token handling
+- the config parser
 - install and service wiring that affects persistence or exposure
 - update-path trust and repository validation in `bin/seclog-update`
 
@@ -84,12 +85,13 @@ Consequently:
 - The URL, the topic, the token and the body are passed to curl through a
   config file on a file descriptor, never as command line arguments, because
   `/proc/<pid>/cmdline` is readable by every other local account.
+- Diagnostics and log lines print the URL with the topic masked. On a public
+  ntfy server the topic name is the only secret protecting the feed.
 - `PUSH_METADATA_LEVEL` defaults to `minimal`. `full` is genuinely more useful
   when investigating, but on a public ntfy topic it hands a stranger a map of
   the machine.
 
-On a public server the topic name is the only secret protecting the feed. Self
-hosting is strongly recommended; see `ntfy/server.yml.example`.
+Self hosting is strongly recommended; see `ntfy/server.yml.example`.
 
 ## Handling of attacker-controlled log data
 
@@ -101,6 +103,12 @@ that a parser reads by scanning the line left to right.
 
 seclog parses defensively:
 
+- The journal is read as JSON and the parser works on the bare `MESSAGE`
+  field. There is no timestamp or syslog prefix in front of it, so sshd's own
+  keyword (`Accepted`, `Failed`, `Invalid`, `Disconnected`, or the
+  `pam_unix(sshd:auth):` prefix) has to be the **first token** of the line.
+  A keyword that merely appears somewhere inside an attacker-chosen name
+  cannot change how the line is classified.
 - The peer address is taken from the **last** `<ip> port <n>` pair on the line.
   sshd always writes the real client there and only appends its own trailer
   afterwards, so the value cannot be steered by the user name.
@@ -111,14 +119,23 @@ seclog parses defensively:
 - Rate-limit state files are keyed on the validated address. Without this, an
   attacker could pin every attempt onto one key and silence the monitor after a
   single notification.
+- Values taken from logs or `ss` are validated as IP literals before they are
+  handed to any other program as an argument.
+
+`tests/parser.bats` contains the forged lines these rules are meant to defeat.
+A change to the parser that breaks one of them is a regression.
 
 ## Configuration file trust
 
-`~/.config/seclog-linux/config` is sourced by every command, so its contents
-execute as the monitored user, and it also carries the update trust settings
-below. seclog refuses to start when the file or its directory is owned by
-someone else or is writable by group or others. The installer tightens an
-existing config to `0600` and its directory to `0700`.
+`~/.config/seclog-linux/config` is **parsed, not sourced**: one `KEY=value`
+per line, an allow-list of known keys, no expansion, no execution. A writer
+cannot run code through it directly.
+
+It still carries the ntfy token and the update trust settings (expected
+origin, repository path, expected signer, update channel). Steering those is
+code execution one step removed, so seclog refuses to start when the file or
+its directory is owned by someone else or is writable by group or others. The
+installer tightens an existing config to `0600` and its directory to `0700`.
 
 ## Update security model
 
@@ -128,17 +145,24 @@ the repository installer. The controls are:
 - **Update path pinning** — updates only run from `~/Projects/seclog-linux`
   unless `ALLOW_CUSTOM_REPO_DIR=1` is set explicitly.
 - **Origin validation** — `origin` must match `EXPECTED_UPDATE_ORIGIN` or
-  `EXPECTED_UPDATE_ORIGIN_ALT`, checked before anything is fetched.
+  `EXPECTED_UPDATE_ORIGIN_ALT` (a trailing `.git` is ignored), checked before
+  anything is fetched.
 - **Canonical path handling** — the repository path is resolved before use.
-- **Mandatory signature verification** — the target commit must carry a good
-  signature. This is not optional and has no off switch. (Releases before 1.1
-  documented a `VERIFY_UPDATE_SIGNATURES` toggle; it no longer exists.)
+- **Mandatory signature verification** — in the default `release` channel the
+  target is the newest `vX.Y.Z` tag reachable from the branch, and the tag
+  must be an annotated tag with a good signature (`git verify-tag`); a
+  lightweight tag is rejected. In the `branch` channel the target commit must
+  carry a good signature (`git verify-commit`). Neither has an off switch.
+- **Signer identity required** — "exit status 0" from the verifier is not
+  enough. The signer identity has to be reported (`Good "git" signature for`
+  for SSH, `GOODSIG` for OpenPGP); for OpenPGP a key merely being in the
+  keyring is not a trust decision.
 - **Signer pinning** — when `UPDATE_SIGNER` is set, the reported identity must
   match it. `seclog-update --yes` refuses to run without it, so an unattended
   update can never fall back to "whatever my keyring happens to trust".
 - **No verify/apply gap** — the update fast-forwards to the exact commit that
-  was verified (`git merge --ff-only <sha>`), not to whatever the branch points
-  at by the time the merge runs.
+  was verified (`git merge --ff-only <sha>`), not to whatever the tag or
+  branch points at by the time the merge runs.
 - **Absolute installer execution** — the installer runs from the checked out
   repository path, not from an ambient shell location.
 
@@ -165,12 +189,14 @@ OpenPGP signing: import the maintainer's public key into the keyring. Note that
 a key merely being present in your keyring is not a trust decision, so with
 OpenPGP you should always pin:
 
-```bash
+```
 # ~/.config/seclog-linux/config
 UPDATE_SIGNER="maintainer@example.com"
 ```
 
-`seclog-diagnose` reports whether this is set up, under `[ Update trust ]`.
+Releases are cut as signed, annotated tags (`git tag -s vX.Y.Z`).
+`seclog diagnose` reports whether all of this is set up, under
+`[ Update trust ]`.
 
 ## Limits of the protection
 
